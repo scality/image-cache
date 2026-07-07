@@ -28,5 +28,18 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Binaries build output
+bin/
+Dockerfile.cross
+
+# RPM build artifacts
+*.rpm
+*.src.rpm
+rpmbuild/
+_build/

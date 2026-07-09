@@ -1,0 +1,29 @@
+name: rpm-ci
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'rpm/**'
+      - '.github/workflows/rpm-ci.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'rpm/**'
+      - '.github/workflows/rpm-ci.yaml'
+
+jobs:
+  test:
+    name: test (el${{ matrix.el }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        el: [8, 9]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run RPM package tests
+        env:
+          EL: ${{ matrix.el }}
+        run: make -C rpm test EL="$EL"

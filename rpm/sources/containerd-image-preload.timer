@@ -1,0 +1,9 @@
+[Unit]
+Description=Periodically pre-load container images from the local cache into containerd
+
+[Timer]
+OnBootSec=0
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

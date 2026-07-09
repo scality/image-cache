@@ -1,0 +1,11 @@
+# Data package: a systemd service/timer plus a helper script; no docs or man pages.
+addFilter(r"no-documentation")
+addFilter(r"no-manual-page-for-binary")
+# The version is injected at build time (_VERSION_ placeholder), so the static
+# %changelog entry version may differ from the built package version.
+addFilter(r"incoherent-version-in-changelog")
+# "Pre-load" trips the dictionary but is correct English.
+addFilter(r"spelling-error Summary\(en_US\) Pre")
+# The repository is private until it is open-sourced, so rpmlint cannot reach
+# the URL yet. Remove this filter once the repository is public.
+addFilter(r"invalid-url URL")

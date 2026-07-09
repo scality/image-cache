@@ -1,0 +1,9 @@
+[Unit]
+Description=Pre-load container images from the local cache into containerd
+After=containerd.service
+Requires=containerd.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/sysconfig/containerd-image-preload
+ExecStart=/usr/bin/containerd-image-preload

@@ -1,0 +1,5 @@
+# Directory holding the *.tar image exports to import into containerd.
+IMAGE_CACHE_DIR=/var/lib/image-cache
+
+# Platform passed to `ctr images import`.
+IMAGE_PLATFORM=linux/amd64

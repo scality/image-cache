@@ -1,0 +1,28 @@
+---
+name: Release
+run-name: Release new ${{ inputs.version-type }} from ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version-type:
+        description: "Version type"
+        required: true
+        type: choice
+        default: "alpha"
+        options: ["alpha", "beta", "GA"]
+      version-scope:
+        description: "Version scope"
+        required: true
+        type: choice
+        default: "patch"
+        options: ["patch", "minor", "major"]
+
+jobs:
+  release:
+    uses: scality/workflows/.github/workflows/release.yaml@v2.9.1
+    with:
+      version-type: ${{ inputs.version-type }}
+      version-scope: ${{ inputs.version-scope }}
+      actions-app-id: ${{ vars.ACTIONS_APP_ID }}
+    secrets: inherit

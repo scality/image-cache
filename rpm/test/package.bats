@@ -70,3 +70,11 @@ setup_file() {
     run shellcheck "sources/$NAME.sh" build.sh
     [ "$status" -eq 0 ]
 }
+
+@test "a release tag is normalized into a valid RPM version" {
+    # Release tags look like v1.2.3 or v1.2.3-alpha.4; RPM forbids '-' in Version
+    # and drops the leading 'v'. The hyphen becomes '~' so pre-releases sort
+    # before the final version.
+    rpm_path="$(VERSION=v9.9.9-alpha.7 bash "${BATS_TEST_DIRNAME}/../build.sh")"
+    [ "$(rpm -qp --qf '%{VERSION}' "$rpm_path")" = "9.9.9~alpha.7" ]
+}

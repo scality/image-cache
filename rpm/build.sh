@@ -6,6 +6,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 NAME=containerd-image-preload
 VERSION="${VERSION:-0.0.0}"
+# Map a release tag to a valid RPM version: drop the leading 'v', and turn the
+# pre-release hyphen (v1.2.3-alpha.4) into '~' since RPM forbids '-' in Version.
+# The '~' also sorts before the final release, as pre-releases should.
+VERSION="${VERSION#v}"
+VERSION="${VERSION//-/\~}"
 dest="${1:-}"
 
 rpmdev-setuptree

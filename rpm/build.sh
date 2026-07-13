@@ -18,7 +18,9 @@ cp -- sources/* "$HOME/rpmbuild/SOURCES/"
 sed "s/_VERSION_/${VERSION}/g" "${NAME}.spec" > "$HOME/rpmbuild/SPECS/${NAME}.spec"
 rpmbuild -bb "$HOME/rpmbuild/SPECS/${NAME}.spec" >&2
 
-built=$(find "$HOME/rpmbuild/RPMS" -name "${NAME}-*.rpm" | head -n1)
+# Match this build's version so a leftover RPM from another build in the same
+# tree (e.g. the test harness building twice) can never be picked instead.
+built=$(find "$HOME/rpmbuild/RPMS" -name "${NAME}-${VERSION}-*.rpm" | head -n1)
 
 if [ -n "$dest" ]; then
     mkdir -p "$dest"

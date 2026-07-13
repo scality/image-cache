@@ -12,3 +12,27 @@ jobs:
     uses: scality/workflows/.github/workflows/promote.yaml@v2.9.1
     permissions:
       contents: write
+
+  attach-rpm:
+    name: attach-rpm (el${{ matrix.el }})
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        el: [8, 9]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build the RPM
+        env:
+          EL: ${{ matrix.el }}
+          VERSION: ${{ github.ref_name }}
+        run: make -C rpm rpm EL="$EL" VERSION="$VERSION"
+      - name: Attach the RPM to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" rpm/_build/*.rpm --clobber

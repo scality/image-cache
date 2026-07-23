@@ -1,7 +1,8 @@
 # Build the manager binary
 FROM golang:1.26 AS builder
-ARG TARGETOS
-ARG TARGETARCH
+ARG TARGETOS=linux
+# The agent only ships for amd64 (see DESIGN.md).
+ARG TARGETARCH=amd64
 
 WORKDIR /workspace
 # Copy the Go Modules manifests

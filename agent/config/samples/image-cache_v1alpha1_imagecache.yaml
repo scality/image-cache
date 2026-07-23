@@ -1,0 +1,9 @@
+apiVersion: image-cache.scality.com/v1alpha1
+kind: ImageCache
+metadata:
+  labels:
+    app.kubernetes.io/name: image-cache-agent
+    app.kubernetes.io/managed-by: kustomize
+  name: imagecache-sample
+spec:
+  # TODO(user): Add fields here

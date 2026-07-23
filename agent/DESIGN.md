@@ -111,6 +111,11 @@ complete and agent-owned:
   tarball is detected and repaired.
 - **Traceability**: the sentinel records the resolved image digest.
 
+The name is the agent's own: an entry carrying it inside a cache image is
+skipped, so the sentinel always describes what the agent extracted. Entries
+are extracted by base name and only regular files are kept, so nothing in an
+image can write outside its directory.
+
 Extraction is atomic for a first extraction: layers are extracted to a
 temporary directory next to the target, the sentinel is written, then the
 directory is renamed into place. A re-extraction swaps remove-then-rename (a

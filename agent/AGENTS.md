@@ -1,3 +1,5 @@
+> This module lives at `agent/` inside the image-cache monorepo; see `DESIGN.md` next to this file for this project's actual API and reconciliation design. The examples below are generic kubebuilder mechanics, not this project's decisions.
+
 # image-cache-agent - AI Agent Guide
 
 ## Project Structure
@@ -145,7 +147,8 @@ kubebuilder create webhook \
 
 ```bash
 make test              # Run unit tests (uses envtest: real K8s API + etcd)
-make run               # Run locally (uses current kubeconfig context)
+make run               # Run locally (uses current kubeconfig context).
+                       # This project requires NODE_NAME: export NODE_NAME=<a-node> first.
 ```
 
 Tests use **Ginkgo + Gomega** (BDD style). Check `suite_test.go` for setup.

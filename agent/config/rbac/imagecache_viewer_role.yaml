@@ -21,9 +21,3 @@ rules:
   - get
   - list
   - watch
-- apiGroups:
-  - image-cache.scality.com
-  resources:
-  - imagecaches/status
-  verbs:
-  - get

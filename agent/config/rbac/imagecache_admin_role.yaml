@@ -19,9 +19,3 @@ rules:
   - imagecaches
   verbs:
   - '*'
-- apiGroups:
-  - image-cache.scality.com
-  resources:
-  - imagecaches/status
-  verbs:
-  - get

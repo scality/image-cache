@@ -33,15 +33,13 @@ import (
 var _ = Describe("ImageCache Controller", func() {
 	Context("When reconciling a resource", func() {
 		const (
-			resourceName      = "test-resource"
-			resourceNamespace = "default"
+			resourceName = "test-resource"
 		)
 
 		ctx := context.Background()
 
 		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: resourceNamespace,
+			Name: resourceName,
 		}
 		imagecache := &imagecachev1alpha1.ImageCache{}
 
@@ -51,10 +49,11 @@ var _ = Describe("ImageCache Controller", func() {
 			if err != nil && errors.IsNotFound(err) {
 				resource := &imagecachev1alpha1.ImageCache{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: resourceNamespace,
+						Name: resourceName,
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: imagecachev1alpha1.ImageCacheSpec{
+						Source: "registry.example.com/boot-cache:1.0.0",
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

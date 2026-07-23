@@ -21,49 +21,43 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// ImageCacheSpec defines the desired state of ImageCache
+// ImageCacheSpec defines the desired state of ImageCache.
 type ImageCacheSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of ImageCache. Edit imagecache_types.go to remove/update
+	// nodeSelector selects the nodes this cache applies to, by exact
+	// key/value match against node labels (same semantics as a pod's
+	// .spec.nodeSelector). Empty or absent selects every node.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
-}
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
-// ImageCacheStatus defines the observed state of ImageCache.
-type ImageCacheStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// source is the reference of the image whose layers contain the
+	// tarballs to cache. The reference uses the usual
+	// registry/repository[:tag|@digest] form.
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	Source string `json:"source"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the ImageCache resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
+	// cachePath is the host directory under which the tarballs are
+	// extracted, in a subdirectory named after this resource. It must
+	// start with '/' and must not contain the substring '..' anywhere
+	// (a plain substring check, not path-segment parsing).
+	// +kubebuilder:default=/var/lib/image-cache
+	// +kubebuilder:validation:Pattern=`^/`
+	// +kubebuilder:validation:XValidation:rule="!self.contains('..')",message="cachePath must not contain '..'"
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	CachePath string `json:"cachePath,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Source",type=string,JSONPath=`.spec.source`
+// +kubebuilder:printcolumn:name="CachePath",type=string,JSONPath=`.spec.cachePath`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="name must not exceed 63 characters: it is used as a node label name"
 
-// ImageCache is the Schema for the imagecaches API
+// ImageCache declares desired boot-cache content for a set of nodes. The
+// agent reports per-node sync status through node labels
+// (image-cache.scality.com/<name>: synced|pending), so the resource name
+// should be chosen up front: metadata.generateName is discouraged.
 type ImageCache struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -74,10 +68,6 @@ type ImageCache struct {
 	// spec defines the desired state of ImageCache
 	// +required
 	Spec ImageCacheSpec `json:"spec"`
-
-	// status defines the observed state of ImageCache
-	// +optional
-	Status ImageCacheStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true

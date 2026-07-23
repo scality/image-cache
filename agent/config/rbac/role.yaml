@@ -5,28 +5,26 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - image-cache.scality.com
   resources:
   - imagecaches
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
-- apiGroups:
-  - image-cache.scality.com
-  resources:
-  - imagecaches/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - image-cache.scality.com
-  resources:
-  - imagecaches/status
-  verbs:
-  - get
-  - patch
-  - update

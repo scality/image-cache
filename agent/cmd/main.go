@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -37,6 +38,7 @@ import (
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 	"github.com/scality/image-cache/agent/internal/controller"
+	"github.com/scality/image-cache/agent/internal/puller"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -178,11 +180,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.ImageCacheReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+	if err := (&controller.NodeReconciler{
+		Client:   mgr.GetClient(),
+		Recorder: mgr.GetEventRecorder("image-cache-agent"),
+		NodeName: os.Getenv("NODE_NAME"),
+		Puller:   puller.Remote{},
+		Resync:   10 * time.Minute,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "imagecache")
+		setupLog.Error(err, "unable to create controller", "controller", "node")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

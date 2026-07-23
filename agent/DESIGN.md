@@ -153,8 +153,12 @@ One pass:
 2. For each desired resource: if its directory is complete, done. Otherwise
    set the label to `pending`, pull `spec.source` (linux/amd64), extract
    atomically, then set the label to `synced`.
-3. Garbage-collect: delete sentinel-bearing directories that no desired
-   resource claims.
+3. Garbage-collect: in every scanned cache path, delete the sentinel-bearing
+   directories that no desired resource claims. The scan set is the default
+   cache path plus every cache path an ImageCache references now or referenced
+   earlier in this agent process's lifetime — a custom path stays in the set
+   after its last resource is deleted, so its orphaned directory is still
+   collected. This set lives only in memory.
 4. Remove `image-cache.scality.com/*` node labels that no desired resource
    claims.
 
@@ -165,11 +169,17 @@ aggregated and the pass is requeued with backoff.
 
 This level-triggered model needs no finalizers. Deletion is not a special
 case — the resource simply disappears from the desired state — so a deletion
-that happens while the agent is down is repaired by the next full pass. (With
-per-resource reconciliation, cleanup after deletion would require finalizers;
-one finalizer per node on a shared cluster-scoped resource is fragile: a
-decommissioned node would leave a finalizer behind and block the deletion
-forever.)
+that happens while the agent is running is repaired by the next full pass.
+One bounded exception survives a restart: because the scan set is in-memory,
+an orphan directory on a non-default cache path whose last resource was
+deleted while the agent was down is collected only once that path is
+referenced again (the default path is always scanned, so it is never
+affected).
+
+Finalizers were considered and rejected: with per-resource reconciliation,
+cleanup after deletion would require one finalizer per node on a shared
+cluster-scoped resource, which is fragile — a decommissioned node would
+leave a finalizer behind and block the deletion forever.
 
 ## Image pulling
 
@@ -222,7 +232,7 @@ Two deployment constraints follow from `cachePath` living on the host:
 
 - `imagecaches`: get, list, watch
 - `nodes`: get, list, watch, patch (labels)
-- `events`: create, patch
+- `events` (`events.k8s.io`): create, patch
 
 The agent never writes ImageCache resources (no status, no finalizers).
 

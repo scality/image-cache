@@ -18,6 +18,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"flag"
 	"os"
 	"time"
@@ -180,11 +181,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	nodeName := os.Getenv("NODE_NAME")
+	if nodeName == "" {
+		setupLog.Error(errors.New("NODE_NAME is empty"),
+			"NODE_NAME environment variable is required (set it from the downward API)")
+		os.Exit(1)
+	}
+
+	fw, err := controller.NewFSWatcher()
+	if err != nil {
+		setupLog.Error(err, "unable to create filesystem watcher")
+		os.Exit(1)
+	}
+	defer func() {
+		if err := fw.Close(); err != nil {
+			setupLog.Error(err, "closing filesystem watcher")
+		}
+	}()
+
 	if err := (&controller.NodeReconciler{
 		Client:   mgr.GetClient(),
 		Recorder: mgr.GetEventRecorder("image-cache-agent"),
-		NodeName: os.Getenv("NODE_NAME"),
+		NodeName: nodeName,
 		Puller:   puller.Remote{},
+		FS:       fw,
 		Resync:   10 * time.Minute,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "node")

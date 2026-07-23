@@ -8,7 +8,7 @@ metadata:
   name: system
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
   name: controller-manager
   namespace: system
@@ -21,7 +21,6 @@ spec:
     matchLabels:
       control-plane: controller-manager
       app.kubernetes.io/name: image-cache-agent
-  replicas: 1
   template:
     metadata:
       annotations:
@@ -30,41 +29,53 @@ spec:
         control-plane: controller-manager
         app.kubernetes.io/name: image-cache-agent
     spec:
-      # TODO(user): Uncomment the following code to configure the nodeAffinity expression
-      # according to the platforms which are supported by your solution.
-      # It is considered best practice to support multiple architectures. You can
-      # build your manager image using the makefile target docker-buildx.
-      # affinity:
-      #   nodeAffinity:
-      #     requiredDuringSchedulingIgnoredDuringExecution:
-      #       nodeSelectorTerms:
-      #         - matchExpressions:
-      #           - key: kubernetes.io/arch
-      #             operator: In
-      #             values:
-      #               - amd64
-      #               - arm64
-      #               - ppc64le
-      #               - s390x
-      #           - key: kubernetes.io/os
-      #             operator: In
-      #             values:
-      #               - linux
+      # The agent image is built for amd64 only (see DESIGN.md); keep the
+      # DaemonSet off other architectures.
+      nodeSelector:
+        kubernetes.io/arch: amd64
       securityContext:
-        # Projects are configured by default to adhere to the "restricted" Pod Security Standards.
-        # This ensures that deployments meet the highest security requirements for Kubernetes.
-        # For more details, see: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
+        # NOTE: despite runAsNonRoot/seccompProfile below, this workload is
+        # NOT restricted- or baseline-PSS-compliant: it uses a hostPath
+        # volume and the chown-cache init container runs as root. Deploy it
+        # into a namespace labeled pod-security.kubernetes.io/enforce=privileged
+        # (see test/e2e for a working example).
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      initContainers:
+        # hostPath ignores fsGroup: hand the cache directory to the agent UID.
+        # Integrators managing permissions at provisioning time can drop this.
+        - name: chown-cache
+          image: busybox:1.37
+          command: ["sh", "-c", "chown 65532:65532 /var/lib/image-cache"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - "ALL"
+              add:
+              - "CHOWN"
+          volumeMounts:
+            - name: image-cache
+              mountPath: /var/lib/image-cache
       containers:
       - command:
         - /manager
         args:
-          - --leader-elect
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: manager
+        env:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
         ports:
         - containerPort: 8081
           name: health
@@ -87,7 +98,10 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
-        # TODO(user): Configure the resources accordingly based on the project requirements.
+        # Extraction streams layers to disk: pulling and extracting a 400 MiB
+        # payload peaks at ~10 MiB of RSS, so the manager's own footprint
+        # (client cache included) dominates this limit. The CPU limit only
+        # throttles decompression.
         # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
         resources:
           limits:
@@ -96,7 +110,13 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
-        volumeMounts: []
-      volumes: []
+        volumeMounts:
+          - name: image-cache
+            mountPath: /var/lib/image-cache
+      volumes:
+        - name: image-cache
+          hostPath:
+            path: /var/lib/image-cache
+            type: DirectoryOrCreate
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10

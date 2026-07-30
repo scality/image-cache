@@ -1,11 +1,12 @@
 name: rpm-ci
 
 on:
+  # No path filter on pull requests: a required status check that never runs
+  # leaves the pull request waiting for it forever, so every pull request has
+  # to report this workflow, even the ones that touch neither `rpm/` nor this
+  # file. Pushes to `main` keep the filter, where nothing waits on them.
   pull_request:
     branches: [main]
-    paths:
-      - 'rpm/**'
-      - '.github/workflows/rpm-ci.yaml'
   push:
     branches: [main]
     paths:

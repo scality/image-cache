@@ -1,5 +1,8 @@
 name: agent-ci
 
+permissions:
+  contents: read
+
 on:
   # No path filter on pull requests: a required status check that never runs
   # leaves the pull request waiting for it forever, so every pull request has

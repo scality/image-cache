@@ -147,7 +147,11 @@ Triggers:
   resource directory disappearing but not a single tarball deleted inside
   one. Watchers are adjusted after each pass as cache paths and resource
   directories come and go.
-- A periodic resync as a safety net for missed events.
+- A periodic resync as a safety net, every hour by default
+  (`--resync-period`). It is not what retries a failed pass, which is
+  requeued with backoff, nor what repairs tampering, which raises a
+  filesystem event. It only bounds how long a drift that raised no event at
+  all can last, such as one spanning an agent restart.
 - A startup trigger guarantees one pass when the agent boots, so stale
   labels and directories from a previous life are cleaned up even if no
   ImageCache exists anymore.

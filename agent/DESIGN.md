@@ -33,7 +33,10 @@ spec:
 
 Validations:
 
-- `source` is required and non-empty.
+- `source` is required and must read as a container image reference:
+  `registry[:port]/repository[:tag][@sha256:<digest>]`, with a lowercase
+  repository, at most 512 characters. The reference is not resolved at
+  admission; only its shape is checked.
 - `cachePath` must be an absolute path.
 - `metadata.name` is capped at 63 characters: the name becomes a node label
   name (see below), and Kubernetes label names cannot exceed 63 characters.

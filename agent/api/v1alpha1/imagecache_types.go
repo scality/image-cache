@@ -31,8 +31,13 @@ type ImageCacheSpec struct {
 
 	// source is the reference of the image whose layers contain the
 	// tarballs to cache. The reference uses the usual
-	// registry/repository[:tag|@digest] form.
+	// registry/repository[:tag|@digest] form; the registry may carry a port,
+	// the repository is lowercase, and a digest is sha256.
+	// The length bound is what keeps the CEL rule below the API server's
+	// per-rule cost budget, which is computed from the declared maximum.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:XValidation:rule="self.matches('^([a-zA-Z0-9][a-zA-Z0-9.-]*(:[0-9]+)?/)?[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-zA-Z0-9_][a-zA-Z0-9._-]*)?(@sha256:[a-f0-9]{64})?$')",message="source must be a container image reference, of the form registry[:port]/repository[:tag][@sha256:<digest>]"
 	// +required
 	Source string `json:"source"`
 

@@ -133,7 +133,9 @@ new ImageCache (the name carries the version), not editing an existing one.
 
 The agent reconciles the node as a whole rather than one ImageCache at a
 time. Every trigger enqueues the same single key, and each pass rebuilds the
-full desired state and converges the disk and the node labels to it.
+full desired state and converges the disk and the node labels to it. That key
+is the node's name: nothing reads it back, but it is what the manager logs as
+the object being reconciled, which is what a log aggregator groups on.
 
 Triggers:
 

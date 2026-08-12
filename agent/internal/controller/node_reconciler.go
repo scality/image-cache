@@ -195,11 +195,13 @@ func (r *NodeReconciler) patchLabels(ctx context.Context, node *corev1.Node, wan
 	return nil
 }
 
-// SetupWithManager wires every trigger to the single node key.
+// SetupWithManager wires every trigger to the single reconcile key, which is
+// the node's name: nothing reads it back, but it is what the manager logs as
+// the object being reconciled.
 func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	toNode := handler.EnqueueRequestsFromMapFunc(
 		func(context.Context, client.Object) []reconcile.Request {
-			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: nodeKey}}}
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: r.NodeName}}}
 		})
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named("node").
@@ -210,7 +212,7 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// are cleaned up without waiting for a resource event.
 	b = b.WatchesRawSource(source.Func(
 		func(_ context.Context, q workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
-			q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Name: nodeKey}})
+			q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Name: r.NodeName}})
 			return nil
 		}))
 

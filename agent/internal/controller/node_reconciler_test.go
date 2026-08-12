@@ -393,7 +393,7 @@ var _ = Describe("filesystem repair", func() {
 		})
 
 		By("starting a real FSWatcher and a second manager/reconciler using it")
-		fw, err := NewFSWatcher()
+		fw, err := NewFSWatcher(fsNodeName)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() {
 			Expect(fw.Close()).To(Succeed())

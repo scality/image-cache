@@ -8,7 +8,7 @@ import (
 )
 
 func TestFSWatcherEmitsOnChange(t *testing.T) {
-	fw, err := NewFSWatcher()
+	fw, err := NewFSWatcher("test-node")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestFSWatcherEmitsOnChange(t *testing.T) {
 }
 
 func TestFSWatcherSetPathsRemovesStaleWatches(t *testing.T) {
-	fw, err := NewFSWatcher()
+	fw, err := NewFSWatcher("test-node")
 	if err != nil {
 		t.Fatal(err)
 	}

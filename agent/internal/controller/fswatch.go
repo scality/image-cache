@@ -10,16 +10,16 @@ import (
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 )
 
-// nodeKey is the single reconcile key: every trigger converges the whole
-// node. (Also used by the reconciler in a later change.)
-const nodeKey = "node"
-
 // FSWatcher turns filesystem changes under the cache paths into reconcile
 // triggers, so manual tampering with the cache is repaired quickly.
 type FSWatcher struct {
 	mu      sync.Mutex
 	watcher *fsnotify.Watcher
 	paths   map[string]bool
+	// trigger is the synthetic event pushed on every change. It is named
+	// after the node so that the reconcile key in the manager's log lines
+	// identifies the node this agent converges.
+	trigger event.GenericEvent
 	// Events feeds the controller's source.Channel. Buffer of one: the
 	// workqueue collapses duplicate keys and a periodic resync covers
 	// missed events, so dropping bursts is harmless.
@@ -27,7 +27,7 @@ type FSWatcher struct {
 }
 
 // NewFSWatcher starts the forwarding goroutine; Close stops it.
-func NewFSWatcher() (*FSWatcher, error) {
+func NewFSWatcher(nodeName string) (*FSWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -35,16 +35,18 @@ func NewFSWatcher() (*FSWatcher, error) {
 	fw := &FSWatcher{
 		watcher: w,
 		paths:   map[string]bool{},
-		Events:  make(chan event.GenericEvent, 1),
+		trigger: event.GenericEvent{
+			Object: &imagecachev1alpha1.ImageCache{
+				ObjectMeta: metav1.ObjectMeta{Name: nodeName},
+			},
+		},
+		Events: make(chan event.GenericEvent, 1),
 	}
 	go fw.run()
 	return fw, nil
 }
 
 func (f *FSWatcher) run() {
-	trigger := event.GenericEvent{
-		Object: &imagecachev1alpha1.ImageCache{ObjectMeta: metav1.ObjectMeta{Name: nodeKey}},
-	}
 	for {
 		select {
 		case _, ok := <-f.watcher.Events:
@@ -52,7 +54,7 @@ func (f *FSWatcher) run() {
 				return
 			}
 			select {
-			case f.Events <- trigger:
+			case f.Events <- f.trigger:
 			default:
 			}
 		case _, ok := <-f.watcher.Errors:

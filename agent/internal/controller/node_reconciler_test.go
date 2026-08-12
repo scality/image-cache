@@ -48,6 +48,11 @@ const (
 	// produces.
 	etcdTarName = "etcd.tar"
 
+	// cleanPathResourceName and slashPathResourceName share one directory
+	// through two spellings of its path, one of them with a trailing slash.
+	cleanPathResourceName = "clean-path-134-0-0"
+	slashPathResourceName = "slash-path-134-0-0"
+
 	// fsNodeName, fsRepairLabelKey/Value, and fsResourceName back the
 	// dedicated "filesystem repair" suite below, which runs its own
 	// manager/node/reconciler outside the Ordered block.
@@ -292,6 +297,59 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 		Eventually(func() (bool, error) {
 			return hasNodeLabel(ctx, nodeKey, missingResourceName)
 		}).Should(BeFalse())
+	})
+
+	It("treats two spellings of the same cache path as one directory", func() {
+		// A trailing slash passes CRD validation and names the same
+		// directory. Keyed apart, the garbage collector would scan that
+		// directory twice, once with a keep set holding the other
+		// resource only, and delete what the pass had just extracted:
+		// the two resources would re-pull each other's content forever.
+		By("creating two resources whose cache paths differ only by a trailing slash")
+		plain := &imagecachev1alpha1.ImageCache{
+			ObjectMeta: metav1.ObjectMeta{Name: cleanPathResourceName},
+			Spec: imagecachev1alpha1.ImageCacheSpec{
+				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
+				Source:       "registry.example.com/boot-cache-clean:134.0.0",
+				CachePath:    cacheDir,
+			},
+		}
+		Expect(k8sClient.Create(ctx, plain)).To(Succeed())
+		slashed := &imagecachev1alpha1.ImageCache{
+			ObjectMeta: metav1.ObjectMeta{Name: slashPathResourceName},
+			Spec: imagecachev1alpha1.ImageCacheSpec{
+				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
+				Source:       "registry.example.com/boot-cache-slash:134.0.0",
+				CachePath:    cacheDir + "/",
+			},
+		}
+		Expect(k8sClient.Create(ctx, slashed)).To(Succeed())
+
+		By("waiting for both to become synced")
+		for _, name := range []string{cleanPathResourceName, slashPathResourceName} {
+			Eventually(func() (string, error) {
+				return nodeLabel(ctx, nodeKey, name)
+			}).Should(Equal(StatusSynced))
+		}
+
+		By("checking neither is collected by the other's pass")
+		Consistently(func() error {
+			for _, name := range []string{cleanPathResourceName, slashPathResourceName} {
+				if _, err := os.Stat(filepath.Join(cacheDir, name, etcdTarName)); err != nil {
+					return err
+				}
+			}
+			return nil
+		}, "3s").Should(Succeed())
+
+		By("cleaning up")
+		Expect(k8sClient.Delete(ctx, plain)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, slashed)).To(Succeed())
+		for _, name := range []string{cleanPathResourceName, slashPathResourceName} {
+			Eventually(func() (bool, error) {
+				return hasNodeLabel(ctx, nodeKey, name)
+			}).Should(BeFalse())
+		}
 	})
 })
 

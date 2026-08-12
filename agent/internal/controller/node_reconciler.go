@@ -7,6 +7,7 @@ import (
 	"context"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -79,7 +80,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 	scanPaths := map[string]bool{defaultCachePath: true}
 	for i := range list.Items {
 		ic := &list.Items[i]
-		scanPaths[ic.Spec.CachePath] = true
+		scanPaths[cachePathOf(ic)] = true
 		if matches(ic.Spec.NodeSelector, node.Labels) {
 			desired = append(desired, ic)
 		}
@@ -92,11 +93,12 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 	keep := map[string]map[string]bool{}
 	var errs []error
 	for _, ic := range desired {
-		if keep[ic.Spec.CachePath] == nil {
-			keep[ic.Spec.CachePath] = map[string]bool{}
+		path := cachePathOf(ic)
+		if keep[path] == nil {
+			keep[path] = map[string]bool{}
 		}
-		keep[ic.Spec.CachePath][ic.Name] = true
-		state, err := r.Store.State(ic.Spec.CachePath, ic.Name)
+		keep[path][ic.Name] = true
+		state, err := r.Store.State(path, ic.Name)
 		switch {
 		case err != nil:
 			errs = append(errs, errors.Wrap(err, errors.WithProperty("resource", ic.Name)))
@@ -143,17 +145,28 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 	return ctrl.Result{RequeueAfter: r.Resync}, nil
 }
 
+// cachePathOf returns the resource's cache path in canonical form. The path
+// is used as a map key and compared against the paths other resources
+// declare, so spellings of the same directory have to collapse into one:
+// `/var/lib/image-cache/` keyed apart from `/var/lib/image-cache` would give
+// the garbage collector a scan set with no matching keep set, and it would
+// delete what the same pass had just extracted.
+func cachePathOf(ic *imagecachev1alpha1.ImageCache) string {
+	return filepath.Clean(ic.Spec.CachePath)
+}
+
 // sync pulls the resource's image and extracts it into its cache directory.
 // It refuses to run when the cache path itself is missing: that means the
 // host mount does not cover it, and extracting would write into the
 // container filesystem.
 func (r *NodeReconciler) sync(ctx context.Context, ic *imagecachev1alpha1.ImageCache) error {
-	if _, err := os.Stat(ic.Spec.CachePath); err != nil {
+	path := cachePathOf(ic)
+	if _, err := os.Stat(path); err != nil {
 		r.Recorder.Eventf(ic, nil, corev1.EventTypeWarning, "CachePathUnavailable", "Sync",
-			"cache path %s does not exist on node %s (is it mounted?)", ic.Spec.CachePath, r.NodeName)
+			"cache path %s does not exist on node %s (is it mounted?)", path, r.NodeName)
 		return errors.Wrap(ErrSync, errors.CausedBy(err),
 			errors.WithDetail("the cache path is missing: is it mounted?"),
-			errors.WithProperty("cachePath", ic.Spec.CachePath))
+			errors.WithProperty("cachePath", path))
 	}
 	content, digest, err := r.Puller.Pull(ctx, ic.Spec.Source)
 	if err != nil {
@@ -164,7 +177,7 @@ func (r *NodeReconciler) sync(ctx context.Context, ic *imagecachev1alpha1.ImageC
 			logf.FromContext(ctx).Error(cerr, "closing image stream", "resource", ic.Name)
 		}
 	}()
-	return r.Store.Extract(ctx, ic.Spec.CachePath, ic.Name, digest, content)
+	return r.Store.Extract(ctx, path, ic.Name, digest, content)
 }
 
 // rememberPaths merges paths into the reconciler's lifetime set of known

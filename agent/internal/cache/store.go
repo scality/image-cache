@@ -5,18 +5,31 @@ import (
 	"archive/tar"
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/scality/go-errors"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 )
 
 // sentinelName marks a directory as fully extracted and agent-owned.
 // It is written last; garbage collection only considers directories
 // bearing it, so foreign content in a shared cache path is never touched.
 const sentinelName = ".image-cache-agent.json"
+
+// Failures of this package are classified by these sentinels. Filesystem and
+// archive errors are stamped with one where they enter, because a foreign
+// error wrapped cause-first would come out titled "unknown error".
+var (
+	// ErrState covers reading the state of a resource's directory.
+	ErrState = errors.New("reading the cache state failed")
+	// ErrExtract covers writing a resource's directory.
+	ErrExtract = errors.New("extracting the cache image failed")
+	// ErrGC covers reclaiming unreferenced directories.
+	ErrGC = errors.New("collecting cache garbage failed")
+)
 
 // State describes a resource's cache directory.
 type State int
@@ -51,11 +64,13 @@ func (s Store) State(cachePath, name string) (State, error) {
 		if _, serr := os.Stat(s.dir(cachePath, name)); errors.Is(serr, os.ErrNotExist) {
 			return Absent, nil
 		} else if serr != nil {
-			return Absent, serr
+			return Absent, errors.Wrap(ErrState, errors.CausedBy(serr),
+				errors.WithProperty("resource", name))
 		}
 		return Incomplete, nil
 	case err != nil:
-		return Absent, err
+		return Absent, errors.Wrap(ErrState, errors.CausedBy(err),
+			errors.WithProperty("resource", name))
 	}
 	var sn sentinel
 	if json.Unmarshal(data, &sn) != nil {
@@ -85,11 +100,13 @@ func (s Store) Extract(
 ) (err error) {
 	tmp, err := os.MkdirTemp(cachePath, "."+name+".tmp-")
 	if err != nil {
-		return fmt.Errorf("creating temporary directory: %w", err)
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("creating the temporary directory"),
+			errors.WithProperty("resource", name))
 	}
 	defer func() {
 		if err != nil {
-			err = errors.Join(err, os.RemoveAll(tmp))
+			err = utilerrors.NewAggregate([]error{err, os.RemoveAll(tmp)})
 		}
 	}()
 
@@ -104,7 +121,8 @@ func (s Store) Extract(
 			break
 		}
 		if rerr != nil {
-			return fmt.Errorf("reading image filesystem: %w", rerr)
+			return errors.Wrap(ErrExtract, errors.CausedBy(rerr),
+				errors.WithDetail("reading the image filesystem"))
 		}
 		if hdr.Typeflag != tar.TypeReg {
 			continue
@@ -120,31 +138,45 @@ func (s Store) Extract(
 		out, oerr := os.OpenFile(filepath.Join(tmp, base), os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
 		if oerr != nil {
 			if errors.Is(oerr, os.ErrExist) {
-				return fmt.Errorf("duplicate file name %q in image", base)
+				return errors.Wrap(ErrExtract,
+					errors.WithDetailf("duplicate file name %q in image", base))
 			}
-			return oerr
+			return errors.Wrap(ErrExtract, errors.CausedBy(oerr),
+				errors.WithDetailf("creating %q", base))
 		}
 		if _, cerr := io.Copy(out, tr); cerr != nil {
-			return errors.Join(fmt.Errorf("writing %q: %w", base, cerr), out.Close())
+			return utilerrors.NewAggregate([]error{
+				errors.Wrap(ErrExtract, errors.CausedBy(cerr),
+					errors.WithDetailf("writing %q", base)),
+				out.Close(),
+			})
 		}
 		if cerr := out.Close(); cerr != nil {
-			return cerr
+			return errors.Wrap(ErrExtract, errors.CausedBy(cerr),
+				errors.WithDetailf("closing %q", base))
 		}
 		files = append(files, base)
 	}
 
 	data, err := json.Marshal(sentinel{Digest: digest, Files: files})
 	if err != nil {
-		return err
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("encoding the sentinel"))
 	}
 	if err = os.WriteFile(filepath.Join(tmp, sentinelName), data, 0o644); err != nil {
-		return err
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("writing the sentinel"))
 	}
 	final := s.dir(cachePath, name)
 	if err = os.RemoveAll(final); err != nil {
-		return err
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("clearing the previous directory"))
 	}
-	return os.Rename(tmp, final)
+	if err = os.Rename(tmp, final); err != nil {
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("swapping the directory into place"))
+	}
+	return nil
 }
 
 // GC removes agent-owned directories (sentinel-bearing, plus stale hidden
@@ -156,7 +188,8 @@ func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(ErrGC, errors.CausedBy(err),
+			errors.WithDetail("listing the cache path"))
 	}
 	var removed []string
 	var errs []error
@@ -171,10 +204,11 @@ func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
 			}
 		}
 		if err := os.RemoveAll(filepath.Join(cachePath, e.Name())); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),
+				errors.WithProperty("directory", e.Name())))
 			continue
 		}
 		removed = append(removed, e.Name())
 	}
-	return removed, errors.Join(errs...)
+	return removed, utilerrors.NewAggregate(errs)
 }

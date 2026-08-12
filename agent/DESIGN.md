@@ -165,7 +165,10 @@ One pass:
 Failures are handled per resource inside the pass: a resource whose image
 cannot be pulled keeps its `pending` label and gets a Kubernetes event
 recorded against it, while the other resources still converge. Errors are
-aggregated and the pass is requeued with backoff.
+aggregated and the pass is requeued with backoff. Each one is stamped with a
+sentinel from `scality/go-errors` where it enters the agent, so an API
+problem, a registry problem and a filesystem problem stay distinguishable
+with `errors.Is` once they have been aggregated.
 
 This level-triggered model needs no finalizers. Deletion is not a special
 case — the resource simply disappears from the desired state — so a deletion

@@ -18,7 +18,6 @@ package main
 
 import (
 	"crypto/tls"
-	"errors"
 	"flag"
 	"os"
 	"time"
@@ -27,6 +26,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/scality/go-errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"

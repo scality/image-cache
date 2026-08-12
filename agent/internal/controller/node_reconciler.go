@@ -5,16 +5,16 @@ package controller
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"maps"
 	"os"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/scality/go-errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -65,11 +65,12 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 
 	var node corev1.Node
 	if err := r.Get(ctx, client.ObjectKey{Name: r.NodeName}, &node); err != nil {
-		return ctrl.Result{}, fmt.Errorf("getting node %s: %w", r.NodeName, err)
+		return ctrl.Result{}, errors.Wrap(ErrNode, errors.CausedBy(err),
+			errors.WithDetail("getting the node"), errors.WithProperty("node", r.NodeName))
 	}
 	var list imagecachev1alpha1.ImageCacheList
 	if err := r.List(ctx, &list); err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, errors.Wrap(ErrResources, errors.CausedBy(err))
 	}
 
 	// Desired resources, plus every cache path any resource mentions: paths
@@ -98,7 +99,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 		state, err := r.Store.State(ic.Spec.CachePath, ic.Name)
 		switch {
 		case err != nil:
-			errs = append(errs, fmt.Errorf("%s: %w", ic.Name, err))
+			errs = append(errs, errors.Wrap(err, errors.WithProperty("resource", ic.Name)))
 			want[ic.Name] = StatusPending
 		case state == cache.Complete:
 			want[ic.Name] = StatusSynced
@@ -117,7 +118,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 		if err := r.sync(ctx, ic); err != nil {
 			r.Recorder.Eventf(ic, nil, corev1.EventTypeWarning, "SyncFailed", "Sync",
 				"syncing %s on node %s: %v", ic.Spec.Source, r.NodeName, err)
-			errs = append(errs, fmt.Errorf("%s: %w", ic.Name, err))
+			errs = append(errs, errors.Wrap(err, errors.WithProperty("resource", ic.Name)))
 			continue
 		}
 		want[ic.Name] = StatusSynced
@@ -125,7 +126,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 
 	for path := range scanPaths {
 		if _, err := r.Store.GC(path, keep[path]); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, errors.Wrap(err, errors.WithProperty("cachePath", path)))
 		}
 	}
 	if err := r.patchLabels(ctx, &node, want); err != nil {
@@ -135,7 +136,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 		r.FS.SetPaths(slices.Collect(maps.Keys(scanPaths)))
 	}
 
-	if err := errors.Join(errs...); err != nil {
+	if err := utilerrors.NewAggregate(errs); err != nil {
 		return ctrl.Result{}, err
 	}
 	log.V(1).Info("node converged", "resources", len(desired))
@@ -150,7 +151,9 @@ func (r *NodeReconciler) sync(ctx context.Context, ic *imagecachev1alpha1.ImageC
 	if _, err := os.Stat(ic.Spec.CachePath); err != nil {
 		r.Recorder.Eventf(ic, nil, corev1.EventTypeWarning, "CachePathUnavailable", "Sync",
 			"cache path %s does not exist on node %s (is it mounted?)", ic.Spec.CachePath, r.NodeName)
-		return fmt.Errorf("cache path %s: %w", ic.Spec.CachePath, err)
+		return errors.Wrap(ErrSync, errors.CausedBy(err),
+			errors.WithDetail("the cache path is missing: is it mounted?"),
+			errors.WithProperty("cachePath", ic.Spec.CachePath))
 	}
 	content, digest, err := r.Puller.Pull(ctx, ic.Spec.Source)
 	if err != nil {
@@ -184,7 +187,12 @@ func (r *NodeReconciler) patchLabels(ctx context.Context, node *corev1.Node, wan
 	}
 	patch := client.MergeFrom(node.DeepCopy())
 	node.Labels = labels
-	return r.Patch(ctx, node, patch)
+	if err := r.Patch(ctx, node, patch); err != nil {
+		return errors.Wrap(ErrNode, errors.CausedBy(err),
+			errors.WithDetail("patching the sync-status labels"),
+			errors.WithProperty("node", r.NodeName))
+	}
+	return nil
 }
 
 // SetupWithManager wires every trigger to the single node key.

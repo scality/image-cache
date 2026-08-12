@@ -109,6 +109,7 @@ func (f *FSWatcher) NeedLeaderElection() bool { return false }
 // later is not missed: its creation is itself an event on the root, and the
 // pass that follows watches it.
 func (f *FSWatcher) SetPaths(roots []string) {
+	log := logf.Log.WithName("fswatch")
 	want := map[string]bool{}
 	for _, root := range roots {
 		want[root] = true
@@ -134,10 +135,24 @@ func (f *FSWatcher) SetPaths(roots []string) {
 		}
 	}
 	for p := range want {
-		if !f.paths[p] {
-			if err := f.watcher.Add(p); err == nil {
-				f.paths[p] = true
-			}
+		if f.paths[p] {
+			continue
+		}
+		err := f.watcher.Add(p)
+		switch {
+		case err == nil:
+			f.paths[p] = true
+		case errors.Is(err, os.ErrNotExist):
+			// The documented case: a cache path no resource has created yet,
+			// or one whose host mount is absent from this node. The next
+			// pass retries.
+		default:
+			// Typically the inotify watch limit, which a busy node can
+			// exhaust. The node still converges on the periodic resync, but
+			// tampering stops being repaired promptly, and that is worth
+			// saying out loud rather than degrading in silence.
+			log.Error(err, "cannot watch a cache directory, tampering will only be repaired by the periodic resync",
+				"path", p)
 		}
 	}
 }

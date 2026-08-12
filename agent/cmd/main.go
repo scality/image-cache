@@ -60,7 +60,6 @@ func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
-	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -68,9 +67,6 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
-		"Enable leader election for controller manager. "+
-			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
@@ -157,24 +153,14 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	// No leader election: every agent of the DaemonSet converges the node it
+	// runs on, so electing one would leave every other node unattended. The
+	// lease RBAC is absent from config/rbac for the same reason.
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "2c043020.scality.com",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
@@ -188,7 +174,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fw, err := controller.NewFSWatcher()
+	fw, err := controller.NewFSWatcher(nodeName)
 	if err != nil {
 		setupLog.Error(err, "unable to create filesystem watcher")
 		os.Exit(1)
@@ -198,6 +184,12 @@ func main() {
 			setupLog.Error(err, "closing filesystem watcher")
 		}
 	}()
+	// The manager owns the forwarding goroutine: it starts with the other
+	// runnables and stops when the manager's context is cancelled.
+	if err := mgr.Add(fw); err != nil {
+		setupLog.Error(err, "unable to add the filesystem watcher to the manager")
+		os.Exit(1)
+	}
 
 	if err := (&controller.NodeReconciler{
 		Client:   mgr.GetClient(),

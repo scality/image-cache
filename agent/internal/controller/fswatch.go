@@ -1,11 +1,14 @@
 package controller
 
 import (
+	"context"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/scality/go-errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 )
@@ -26,13 +29,15 @@ type FSWatcher struct {
 	Events chan event.GenericEvent
 }
 
-// NewFSWatcher starts the forwarding goroutine; Close stops it.
+// NewFSWatcher opens the watcher. Nothing is watched until SetPaths runs, and
+// no event is forwarded until Start does.
 func NewFSWatcher(nodeName string) (*FSWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(ErrWatcher, errors.CausedBy(err),
+			errors.WithDetail("opening the filesystem watcher"))
 	}
-	fw := &FSWatcher{
+	return &FSWatcher{
 		watcher: w,
 		paths:   map[string]bool{},
 		trigger: event.GenericEvent{
@@ -41,29 +46,56 @@ func NewFSWatcher(nodeName string) (*FSWatcher, error) {
 			},
 		},
 		Events: make(chan event.GenericEvent, 1),
-	}
-	go fw.run()
-	return fw, nil
+	}, nil
 }
 
-func (f *FSWatcher) run() {
+// Start forwards filesystem events until ctx is cancelled or the watcher is
+// closed. It implements manager.Runnable so that the manager owns the
+// goroutine, rather than the constructor starting one behind the caller's
+// back.
+func (f *FSWatcher) Start(ctx context.Context) error {
+	log := logf.FromContext(ctx).WithName("fswatch")
 	for {
 		select {
+		case <-ctx.Done():
+			return nil
 		case _, ok := <-f.watcher.Events:
 			if !ok {
-				return
+				return f.closed(ctx)
 			}
 			select {
 			case f.Events <- f.trigger:
 			default:
 			}
-		case _, ok := <-f.watcher.Errors:
+		case err, ok := <-f.watcher.Errors:
 			if !ok {
-				return
+				return f.closed(ctx)
 			}
+			// Losing an event is not fatal: the periodic resync still
+			// converges the node. Report it rather than dropping it, since
+			// it is the only sign that repairs went from prompt to delayed.
+			log.Error(err, "filesystem watch error, falling back on the periodic resync")
 		}
 	}
 }
+
+// closed reports how the forwarding loop ended. The watcher's channels close
+// on Close, which the agent only calls on its way out; if they close while
+// the agent is meant to keep running, saying so is what makes the manager
+// stop. Returning nil there would leave an agent that looks healthy while
+// silently falling back on the periodic resync.
+func (f *FSWatcher) closed(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+	return errors.Wrap(ErrWatcher, errors.WithDetail("the watcher closed on its own"))
+}
+
+// NeedLeaderElection implements manager.LeaderElectionRunnable. Leader
+// election is not enabled at all (see cmd/main.go), so this only states the
+// intent for anyone who would turn it on: every agent watches the node it
+// runs on, and there is no leader among them.
+func (f *FSWatcher) NeedLeaderElection() bool { return false }
 
 // SetPaths adjusts the watched directories to exactly paths. Directories
 // that do not exist yet are skipped; the next reconcile pass retries.
@@ -91,5 +123,5 @@ func (f *FSWatcher) SetPaths(paths []string) {
 	}
 }
 
-// Close stops the underlying watcher and the forwarding goroutine.
+// Close stops the underlying watcher, which ends Start.
 func (f *FSWatcher) Close() error { return f.watcher.Close() }

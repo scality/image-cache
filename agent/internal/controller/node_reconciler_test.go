@@ -411,6 +411,8 @@ var _ = Describe("filesystem repair", func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 
+		Expect(mgr.Add(fw)).To(Succeed())
+
 		Expect((&NodeReconciler{
 			Client:   mgr.GetClient(),
 			Recorder: mgr.GetEventRecorder("image-cache-agent-fsrepair-test"),

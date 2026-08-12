@@ -458,21 +458,16 @@ var _ = Describe("filesystem repair", func() {
 			return os.ReadFile(tarPath)
 		}).Should(Equal([]byte("etcd")))
 
-		// Reconcile only ever calls FS.SetPaths with each resource's
-		// cachePath (see node_reconciler.go), never with the per-resource
-		// subdirectory Store.Extract nests under it; and fsnotify's inotify
-		// backend is not recursive (verified against the exact pinned
-		// version, github.com/fsnotify/fsnotify v1.10.1): a watch on
-		// fsCacheDir only reports changes to fsCacheDir's direct children,
-		// not to files nested a level deeper inside fsResourceName's own
-		// directory. So removing just the tar file would raise no event at
-		// all. Removing the resource directory itself - a direct child of
-		// the watched fsCacheDir - is therefore the tamper a real FSWatcher
-		// can actually observe, and is what this test exercises: no
-		// ImageCache event occurs anywhere in this flow, only the fsnotify
-		// trigger does.
-		By("removing the resource's cache directory from under the agent")
-		Expect(os.RemoveAll(filepath.Join(fsCacheDir, fsResourceName))).To(Succeed())
+		// fsnotify's inotify backend is not recursive (verified against the
+		// exact pinned version, github.com/fsnotify/fsnotify v1.10.1): a
+		// watch on fsCacheDir reports changes to its direct children only.
+		// SetPaths therefore watches each cachePath and its resource
+		// directories, which is what makes the tamper below observable:
+		// deleting a single tarball, the way an operator reclaiming disk
+		// space would. No ImageCache event occurs anywhere in this flow,
+		// only the fsnotify trigger does.
+		By("deleting a single tarball from under the agent")
+		Expect(os.Remove(tarPath)).To(Succeed())
 
 		By("waiting for the fsnotify-triggered pass to repair it")
 		Eventually(func() ([]byte, error) {

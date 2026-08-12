@@ -141,8 +141,12 @@ Triggers:
 
 - Any ImageCache event (create, update, delete), mapped to the single key.
 - Filesystem events (fsnotify) on the cache paths in use, so a manual
-  deletion of tarballs is repaired quickly. Watchers are adjusted after each
-  pass as cache paths come and go.
+  deletion of tarballs is repaired quickly. Each cache path is watched
+  together with the resource directories under it: fsnotify is not
+  recursive, and a watch on the cache path alone would report a whole
+  resource directory disappearing but not a single tarball deleted inside
+  one. Watchers are adjusted after each pass as cache paths and resource
+  directories come and go.
 - A periodic resync as a safety net for missed events.
 - A startup trigger guarantees one pass when the agent boots, so stale
   labels and directories from a previous life are cleaned up even if no

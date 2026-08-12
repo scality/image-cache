@@ -64,6 +64,55 @@ func TestFSWatcherSetPathsRemovesStaleWatches(t *testing.T) {
 	}
 }
 
+// A tarball lives one level below the cache path, in the resource's own
+// directory: watching the roots alone would miss it being deleted.
+func TestFSWatcherEmitsOnChangeInsideAResourceDirectory(t *testing.T) {
+	fw := startedWatcher(t)
+	root := t.TempDir()
+	resource := filepath.Join(root, "worker-134-0-0")
+	if err := os.Mkdir(resource, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tarball := filepath.Join(resource, "pause.tar")
+	if err := os.WriteFile(tarball, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fw.SetPaths([]string{root})
+	if err := os.Remove(tarball); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fw.Events:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event received after a tarball was deleted inside a resource directory")
+	}
+}
+
+// A resource directory created after the last pass is picked up by the next
+// call to SetPaths, without the caller having to enumerate subdirectories.
+func TestFSWatcherWatchesResourceDirectoriesCreatedLater(t *testing.T) {
+	fw := startedWatcher(t)
+	root := t.TempDir()
+	fw.SetPaths([]string{root}) // nothing below the root yet
+
+	resource := filepath.Join(root, "control-plane-134-0-0")
+	if err := os.Mkdir(resource, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fw.SetPaths([]string{root}) // the pass that follows the creation event
+	drain(fw)
+
+	if err := os.WriteFile(filepath.Join(resource, "etcd.tar"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fw.Events:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event received for a resource directory created after the first pass")
+	}
+}
+
 // A watcher that dies while the agent keeps running would silently downgrade
 // repairs to the periodic resync, so Start has to report it.
 func TestFSWatcherStartReportsAnUnexpectedClose(t *testing.T) {
@@ -84,5 +133,14 @@ func TestFSWatcherStartReportsAnUnexpectedClose(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return after the watcher was closed")
+	}
+}
+
+// drain empties the one-slot event channel so that the next receive proves a
+// new event, not a leftover one.
+func drain(fw *FSWatcher) {
+	select {
+	case <-fw.Events:
+	case <-time.After(100 * time.Millisecond):
 	}
 }

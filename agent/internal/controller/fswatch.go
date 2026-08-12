@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
@@ -97,15 +99,32 @@ func (f *FSWatcher) closed(ctx context.Context) error {
 // runs on, and there is no leader among them.
 func (f *FSWatcher) NeedLeaderElection() bool { return false }
 
-// SetPaths adjusts the watched directories to exactly paths. Directories
-// that do not exist yet are skipped; the next reconcile pass retries.
-func (f *FSWatcher) SetPaths(paths []string) {
+// SetPaths adjusts the watched directories to exactly roots and their
+// immediate subdirectories. Watching the roots alone would report a whole
+// resource directory disappearing but not a single tarball deleted inside
+// one, because the cache layout is <cachePath>/<resource>/<files> and
+// fsnotify does not watch recursively.
+//
+// Directories that do not exist yet are skipped. A resource directory created
+// later is not missed: its creation is itself an event on the root, and the
+// pass that follows watches it.
+func (f *FSWatcher) SetPaths(roots []string) {
+	want := map[string]bool{}
+	for _, root := range roots {
+		want[root] = true
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				want[filepath.Join(root, e.Name())] = true
+			}
+		}
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	want := map[string]bool{}
-	for _, p := range paths {
-		want[p] = true
-	}
 	for p := range f.paths {
 		if !want[p] {
 			// Removal of an already-deleted directory fails harmlessly;

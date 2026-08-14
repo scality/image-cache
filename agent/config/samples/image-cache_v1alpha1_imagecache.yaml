@@ -1,0 +1,11 @@
+apiVersion: image-cache.scality.com/v1alpha1
+kind: ImageCache
+metadata:
+  labels:
+    app.kubernetes.io/name: image-cache-agent
+    app.kubernetes.io/managed-by: kustomize
+  name: imagecache-sample
+spec:
+  nodeSelector:
+    kubernetes.io/os: linux
+  source: registry.example.com/boot-cache-worker:1.0.0

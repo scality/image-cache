@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: image-cache-agent
+    app.kubernetes.io/managed-by: kustomize
+  name: system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: controller-manager
+  namespace: system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: image-cache-agent
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: image-cache-agent
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: controller-manager
+        app.kubernetes.io/name: image-cache-agent
+    spec:
+      # The agent image is built for amd64 only (see DESIGN.md); keep the
+      # DaemonSet off other architectures.
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      securityContext:
+        # NOTE: despite runAsNonRoot/seccompProfile below, this workload is
+        # NOT restricted- or baseline-PSS-compliant: it uses a hostPath
+        # volume and the chown-cache init container runs as root. Deploy it
+        # into a namespace labeled pod-security.kubernetes.io/enforce=privileged
+        # (see test/e2e for a working example).
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      initContainers:
+        # hostPath ignores fsGroup: hand the cache directory to the agent UID.
+        # Integrators managing permissions at provisioning time can drop this.
+        - name: chown-cache
+          image: busybox:1.37
+          command: ["sh", "-c", "chown 65532:65532 /var/lib/image-cache"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - "ALL"
+              add:
+              - "CHOWN"
+          volumeMounts:
+            - name: image-cache
+              mountPath: /var/lib/image-cache
+      containers:
+      - command:
+        - /manager
+        args:
+          - --health-probe-bind-address=:8081
+        image: controller:latest
+        name: manager
+        env:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+        ports:
+        - containerPort: 8081
+          name: health
+          protocol: TCP
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        # Extraction streams layers to disk: pulling and extracting a 400 MiB
+        # payload peaks at ~10 MiB of RSS, so the manager's own footprint
+        # (client cache included) dominates this limit. The CPU limit only
+        # throttles decompression.
+        # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        volumeMounts:
+          - name: image-cache
+            mountPath: /var/lib/image-cache
+      volumes:
+        - name: image-cache
+          hostPath:
+            path: /var/lib/image-cache
+            type: DirectoryOrCreate
+      serviceAccountName: controller-manager
+      terminationGracePeriodSeconds: 10

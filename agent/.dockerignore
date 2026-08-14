@@ -1,0 +1,10 @@
+# More info: https://docs.docker.com/engine/reference/builder/#dockerignore-file
+# Ignore everything by default and re-include only what the build needs.
+**
+!go.mod
+!go.sum
+!cmd/**
+!api/**
+!internal/**
+# Test files are not part of the manager binary.
+**/*_test.go

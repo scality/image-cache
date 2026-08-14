@@ -50,3 +50,24 @@ teardown() {
     [ "$status" -eq 0 ]
     grep -q -- "--platform linux/arm64" "$CTR_LOG"
 }
+
+@test "imports tars from cache subdirectories" {
+    # a per-resource subdirectory as laid out by the cache agent
+    mkdir -p "$CACHE/worker-134-0-0"
+    : > "$CACHE/worker-134-0-0/etcd.tar"
+    : > "$CACHE/worker-134-0-0/.image-cache-agent.json"
+    run env "PATH=$BIN:$PATH" "IMAGE_CACHE_DIR=$CACHE" bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ "$(grep -c "worker-134-0-0/etcd.tar" "$CTR_LOG")" -eq 1 ]
+    ! grep -q "image-cache-agent.json" "$CTR_LOG"
+}
+
+@test "does not import tars from hidden or deeper directories" {
+    mkdir -p "$CACHE/.worker.tmp-1" "$CACHE/deep/nested"
+    : > "$CACHE/.worker.tmp-1/etcd.tar"
+    : > "$CACHE/deep/nested/etcd.tar"
+    run env "PATH=$BIN:$PATH" "IMAGE_CACHE_DIR=$CACHE" bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    ! grep -q "tmp-1/etcd.tar" "$CTR_LOG"
+    ! grep -q "nested/etcd.tar" "$CTR_LOG"
+}

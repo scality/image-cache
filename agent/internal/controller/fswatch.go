@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 )
@@ -30,6 +31,11 @@ type FSWatcher struct {
 	// missed events, so dropping bursts is harmless.
 	Events chan event.GenericEvent
 }
+
+var (
+	_ manager.Runnable               = &FSWatcher{}
+	_ manager.LeaderElectionRunnable = &FSWatcher{}
+)
 
 // NewFSWatcher opens the watcher. Nothing is watched until SetPaths runs, and
 // no event is forwarded until Start does.

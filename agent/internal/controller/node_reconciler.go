@@ -193,14 +193,25 @@ func (r *NodeReconciler) rememberPaths(paths map[string]bool) map[string]bool {
 	return maps.Clone(r.knownPaths)
 }
 
+// patchLabels brings the node's sync-status labels to want, updating node in
+// place to match. Nothing is sent when they already agree, which is what makes
+// the second call of a reconcile free once the first one converged.
+//
+// The write is a merge patch of those labels alone, never a full update: this
+// agent is not the only writer of a Node object, and everything it did not
+// touch must survive its writes.
 func (r *NodeReconciler) patchLabels(ctx context.Context, node *corev1.Node, want map[string]string) error {
 	labels, changed := applyStatusLabels(node.Labels, want)
 	if !changed {
 		return nil
 	}
-	patch := client.MergeFrom(node.DeepCopy())
+
+	// The patch is computed at Patch time as the difference between base and
+	// node, so base has to be a copy of the node as read: taking it after the
+	// assignment below, or aliasing node, would yield an empty patch.
+	base := node.DeepCopy()
 	node.Labels = labels
-	if err := r.Patch(ctx, node, patch); err != nil {
+	if err := r.Patch(ctx, node, client.MergeFrom(base)); err != nil {
 		return errors.Wrap(ErrNode, errors.CausedBy(err),
 			errors.WithDetail("patching the sync-status labels"),
 			errors.WithProperty("node", r.NodeName))

@@ -1,7 +1,9 @@
 # Review criteria
 
-Read by the `/review-pr` skill (Scality agent hub) and by anyone reviewing by hand.
-Flag problems only — see "What not to flag" at the end.
+Read by the `/review-pr` skill, which the Code Review workflow runs on every pull
+request, and by anyone reviewing by hand.
+Flag problems only, and report them the way "Reporting a finding" describes at the
+end. "What not to flag" closes the file.
 
 ## What this repo is
 
@@ -24,7 +26,8 @@ subdirectory, archive names, completion sentinel). The agent writes, the package
 imports.
 
 This code is generic and open-source: it knows about Kubernetes and containerd,
-never about a specific downstream distribution or product.
+never about a specific downstream distribution or product. Its docs are read by
+people outside the team, so they are part of what ships.
 
 ## Criteria
 
@@ -47,9 +50,25 @@ never about a specific downstream distribution or product.
 | EL8 and EL9 | Both are supported targets: no bash, systemd or `ctr` feature that exists on only one of them. |
 | Tests | Every new logic path has a test. Extraction and path-safety changes need a hostile-input case. Script changes need bats cases. Behaviour visible through the API needs an e2e case, and e2e cleanup must run even when the test fails. |
 | CI workflows | Reusable callers pinned by commit digest with the version in a trailing comment. Secrets are **not** inherited by a `uses:` job — every secret the shared workflow needs must be listed under `secrets:`. `permissions:` least-privilege. A new job must also be wired into whatever gates the merge. |
-| Docs sync | A change to behaviour, flags, paths, labels or the CRD is reflected in `agent/DESIGN.md` and, when user-facing, in `README.md`. |
+| Docs sync | A change to behaviour, flags, paths, labels or the CRD is reflected in `agent/DESIGN.md` and, when user-facing, in `README.md` and `agent/README.md`. |
+| Doc claims | Every command, path, filename, flag, default and version a doc states is checked against what implements it: the `Makefile` target, the spec file, the manifest, the flag definition. A finding here names that source. A wrong command costs a reader more than a wrong comment does. |
+| Documented commands | A command the docs tell a reader to run says what it destroys. `make undeploy` deletes the CRD and every `ImageCache` object with it; a page presenting it as removing the DaemonSet is a defect, not a wording preference. |
+| Doc set consistency | The docs are read as a set: `README.md`, `agent/README.md`, `DESIGN.md`, `agent/DESIGN.md`, `CONTRIBUTING.md`, `agent/AGENTS.md`, this file. The same fact stated twice in different words is a defect, and so is a rule one file sets and another breaks. Prefer a link to a second copy. |
+| Hazard written down instead of fixed | A pull request that documents a footgun a small change would remove (an unpinned version, a missing CI gate, a manual step nothing enforces) gets that said once. Prefer the fix. A deliberate deferral belongs in the commit message, not only in the doc. |
 | Security | No secret or token in code, tests or logs. No value taken from a custom resource interpolated into a shell command. Image references validated before use. |
 | Breaking changes | Call these out explicitly: CRD schema, label keys, cache path layout, installed file paths, unit names, agent flags and environment variables. Consumers pin to them. |
+
+## Reporting a finding
+
+- One finding per defect. Several findings sharing a root cause are one finding,
+  reported where the cause lives.
+- Name the file and line that proves it, in the implementation rather than in the
+  diff under review. "The Makefile never installs it" is a claim; the line where
+  `KIND ?= kind` is declared is proof.
+- State the failure concretely: what someone does, and what they get instead. A
+  finding nobody can reproduce from its own text is not actionable.
+- Rank by what it costs whoever hits it, not by how surprising it is.
+- Say so when a finding rests on something you could not check.
 
 ## What not to flag
 
@@ -60,3 +79,8 @@ never about a specific downstream distribution or product.
   respect to the sources in the same PR.
 - Markdown or comment wording preferences.
 - Refactors unrelated to the PR's purpose.
+- A trade-off the commit message states and argues for, unless the argument is
+  wrong on the facts.
+- A hazard the pull request already documents and defers, beyond the single
+  finding that says so.
+- Missing documentation for something the repository does not have yet.

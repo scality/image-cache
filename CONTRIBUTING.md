@@ -98,6 +98,9 @@ make -C rpm rpm EL=9        # build the RPM into rpm/_build/
 - Run the relevant `make` targets before opening the pull request. Both CI
   workflows run on every pull request, and the code owners listed in
   [.github/CODEOWNERS](.github/CODEOWNERS) are requested for review.
+- Fill in the pull request template. Its sections are what a reviewer needs to
+  read the change: which half it touches, the problem, the decisions, what you
+  ran, and what it leaves alone.
 - Reviewers work from [.claude/REVIEW.md](.claude/REVIEW.md), which spells out
   what this repository cares about in a review. Reading it before you open the
   pull request saves a round trip.

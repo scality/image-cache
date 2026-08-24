@@ -40,9 +40,9 @@ Never hand-edit these; regenerate them instead:
 - `PROJECT`, written by the kubebuilder CLI and read by it for later
   scaffolding
 
-They come from the markers in the Go sources, so change the marker and run
-`make manifests generate`. Commit the result: CI regenerates before testing but
-does not fail on an uncommitted diff, so a stale CRD reaches `main` unnoticed.
+They come from the markers in the Go sources, so change the marker, run
+`make manifests generate`, and commit the result. Nothing in CI catches a stale
+one; [../CONTRIBUTING.md](../CONTRIBUTING.md#agent-go) says why.
 
 Leave the `+kubebuilder:scaffold:*` comments alone. They are insertion points
 for the kubebuilder CLI, in `cmd/main.go`, `internal/controller/suite_test.go`
@@ -61,9 +61,9 @@ make test-e2e    # needs kind and an idle cluster name, see below
 image, loads it and deploys the manifests. It needs `kind` and `kubectl` on
 your `PATH`; neither is downloaded by the `Makefile`.
 
-A green `make lint` right after a dependency bump is not proof: the analysis
-cache goes stale and hides findings. Run `bin/golangci-lint cache clean` before
-trusting it.
+A green `make lint` right after a dependency bump is not proof. Run
+`bin/golangci-lint cache clean` first, for the reason
+[../CONTRIBUTING.md](../CONTRIBUTING.md#agent-go) gives.
 
 `make run` runs the manager against your current kubeconfig. It needs
 `NODE_NAME` pointing at a real node and a writable cache path, because it

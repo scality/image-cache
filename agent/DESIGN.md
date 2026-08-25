@@ -37,7 +37,8 @@ Validations:
   `registry[:port]/repository[:tag][@sha256:<digest>]`, with a lowercase
   repository, at most 512 characters. The reference is not resolved at
   admission; only its shape is checked.
-- `cachePath` must be an absolute path.
+- `cachePath` must be an absolute path and must not contain `..` anywhere,
+  checked as a plain substring rather than by parsing path segments.
 - `metadata.name` is capped at 63 characters: the name becomes a node label
   name (see below), and Kubernetes label names cannot exceed 63 characters.
 
@@ -107,8 +108,9 @@ The sentinel file is written after everything else and marks the directory as
 complete and agent-owned:
 
 - **Ownership**: garbage collection only ever considers directories containing
-  a sentinel. Flat tarballs (e.g. placed by provisioning at bootstrap) and
-  foreign directories in a shared cache path are never touched.
+  a sentinel, plus the agent's own interrupted extractions (hidden, and holding
+  `.tmp-`, see below). Flat tarballs (e.g. placed by provisioning at bootstrap)
+  and foreign directories in a shared cache path are never touched.
 - **Completeness**: a directory without a sentinel is a partial extraction and
   is redone. The sentinel lists the expected file names, so a manually deleted
   tarball is detected and repaired.

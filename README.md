@@ -100,25 +100,11 @@ make -C agent docker-build docker-push IMG=<your-registry>/image-cache-agent:<ta
 make -C agent deploy IMG=<your-registry>/image-cache-agent:<tag>
 ```
 
-`docker-build` follows the architecture of the machine it runs on, and the
-DaemonSet only schedules onto amd64. From anything else, build with
-`make -C agent docker-buildx IMG=<...>`, which pins `linux/amd64` and pushes in
-one step.
-
-The agent needs a host directory mounted at the cache path, and a namespace
-that enforces the `privileged` Pod Security Standard: it mounts a `hostPath`
-and its init container runs as root. The manifests under
-[`agent/config/`](agent/config) do not label the namespace they create, so
-either add `pod-security.kubernetes.io/enforce=privileged` to it or deploy
-them into a namespace that already has it. They also keep the DaemonSet on
-`kubernetes.io/arch: amd64`, which is the architecture the image is meant to
-target.
-
-It reads its own node name from `NODE_NAME`, which the manifests fill from the
-downward API, and refuses to start without it. Everything else is flags, with
-`--resync-period` the one that changes behaviour; see
-[agent/README.md](agent/README.md#configuration) for what it bounds and when
-turning it off bites.
+Those two commands are enough from an amd64 machine, deploying into a
+namespace that enforces the `privileged` Pod Security Standard. Anything else
+takes a step or two, and [agent/README.md](agent/README.md#deploying) has them:
+building for amd64 from another architecture, the label the manifests leave off
+the namespace they create, and the flags, `--resync-period` included.
 
 Then declare what each node should cache:
 
@@ -141,12 +127,11 @@ makes the cache state greppable and gateable:
 kubectl get nodes -l image-cache.scality.com/worker-1-0-0=synced
 ```
 
-Deleting the resource removes its tarballs and its labels, as long as the
-agent that saw its `cachePath` is still running. A path other than the default
-is only remembered for the lifetime of the process, so a resource deleted while
-the agent restarts leaves its directory behind. Two resources can
-select the same node, so an upgrade can stage new content next to the old one
-and drop the old one once every node is done.
+Deleting the resource removes its tarballs and its labels while the agent is
+running; [agent/README.md](agent/README.md#declaring-a-cache) has the case where
+a directory outlives it. Two resources can select the same node, so an upgrade
+can stage new content next to the old one and drop the old one once every node
+is done.
 
 ## Repository layout
 

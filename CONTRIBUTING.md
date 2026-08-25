@@ -16,7 +16,8 @@ The repository holds two independent components, each with its own toolchain:
 - [`agent/`](agent): the `image-cache-agent` Go module (kubebuilder), its
   `ImageCache` CRD and its deployment manifests.
 - [`rpm/`](rpm): the `containerd-image-preload` package, with shell sources,
-  systemd units, spec file, build script and tests.
+  systemd units, spec file, build script and tests. Its
+  [README](rpm/README.md) covers the toolchain.
 
 Keep a change inside one component when you can. Reviewers read the repository
 that way, and the toolchains have nothing in common. Releases do not follow

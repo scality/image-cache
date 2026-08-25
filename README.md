@@ -89,6 +89,8 @@ IMAGE_PLATFORM=linux/amd64
 
 Releases carry the RPM for both EL versions as assets, see
 [Releases](https://github.com/scality/image-cache/releases).
+[rpm/README.md](rpm/README.md) has the rest: what the glob covers, what
+happens when an import fails, and how the package is built.
 
 ### The agent
 

@@ -27,8 +27,8 @@ lifetimes, so they are separate components:
   runs `ctr images import` over every tarball of the cache directory, on boot
   and periodically. It is deliberately dumb: a shell script, no daemon, no
   Kubernetes client, no registry access. It works on a node whose cluster is
-  down, and it is idempotent, so re-importing what containerd already has
-  costs a check.
+  down, and it is idempotent: re-importing what containerd already has
+  replaces nothing and breaks nothing.
 
 - **`image-cache-agent`** (a Kubernetes DaemonSet) answers *fill*. It watches
   `ImageCache` custom resources, pulls the images they point at, extracts the

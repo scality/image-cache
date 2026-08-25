@@ -129,11 +129,10 @@ makes the cache state greppable and gateable:
 kubectl get nodes -l image-cache.scality.com/worker-1-0-0=synced
 ```
 
-Deleting the resource removes its tarballs and its labels while the agent is
-running; [agent/README.md](agent/README.md#declaring-a-cache) has the case where
-a directory outlives it. Two resources can select the same node, so an upgrade
-can stage new content next to the old one and drop the old one once every node
-is done.
+[agent/README.md](agent/README.md#declaring-a-cache) has the fields and what
+deleting a resource removes. Two resources can select the same node, so an
+upgrade can stage new content next to the old one and drop the old one once
+every node is done.
 
 ## Repository layout
 

@@ -87,8 +87,9 @@ says so.
 
 Out of scope, deliberately:
 
-- **Building the cache images.** Their content is the caller's decision; any
-  image whose layers contain `*.tar` exports works.
+- **Building the cache images.** Their content is the caller's decision, and
+  the project ships no tool for it. The shape one has to take is short enough
+  to fit in the [README](README.md#building-a-cache-image).
 - **Deciding when to publish a new version.** The agent converges on what
   exists; orchestration (creating resources, gating on the node labels,
   deleting the old ones) belongs to whatever drives the upgrade.

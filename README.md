@@ -134,6 +134,42 @@ deleting a resource removes. Two resources can select the same node, so an
 upgrade can stage new content next to the old one and drop the old one once
 every node is done.
 
+### Building a cache image
+
+A cache image is an ordinary container image whose layers carry the tarballs.
+Nothing else makes it special, so whatever already builds your images builds
+one. Export what you want cached, then package it:
+
+```console
+docker save registry.example.com/my-app:1.0.0 -o my-app.tar
+docker save registry.example.com/my-other-app:2.1.0 -o my-other-app.tar
+```
+
+```dockerfile
+FROM scratch
+COPY *.tar /
+```
+
+```console
+docker build --platform linux/amd64 -t registry.example.com/my-boot-cache-worker:1.0.0 .
+docker push registry.example.com/my-boot-cache-worker:1.0.0
+```
+
+Three things the agent expects:
+
+- **A `linux/amd64` image.** It resolves the reference for that platform and
+  no other, which is also why the build above pins it.
+- **Unique file names.** The image filesystem is flattened to base names, so
+  two files called `app.tar` sitting in different directories fail the
+  extraction instead of overwriting each other.
+- **`FROM scratch`, or something equally empty.** Every regular file of the
+  flattened image lands in the cache directory, so a conventional base image
+  would pour its whole filesystem in there.
+
+The layout inside the image does not matter, since only base names survive.
+Files that do not end in `.tar` are extracted too, but the preload service
+ignores them.
+
 ## Repository layout
 
 ```

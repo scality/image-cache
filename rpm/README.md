@@ -109,7 +109,10 @@ make clean           # remove _build/ and the binary staged for packaging
 
 `EL` selects the target, 8 or 9, and both are supported: keep out of any bash,
 systemd or `ctr` feature that only one of them has. Any change to behaviour
-comes with a bats case in [`test/`](test), exercised on both.
+comes with a bats case in [`test/`](test), exercised on both. The one case that
+does not run on both is the ShellCheck pass over the bats files themselves:
+ShellCheck only learned to parse them in 0.9.0, and Rocky 8 ships 0.6.0, so
+that case skips on EL8 and gates on EL9.
 
 `VERSION` stamps the package, defaulting to `0.0.0`. Release tags are
 normalized on the way in: the leading `v` goes, and the hyphen of a pre-release

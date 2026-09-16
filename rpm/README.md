@@ -73,9 +73,24 @@ namespace, which is where the kubelet looks. Re-importing an image containerd
 already has replaces nothing and breaks nothing, which is what makes running
 the timer on a short period harmless.
 
-The script runs under `set -euo pipefail`. A tarball that fails to import
-aborts that run, leaving the ones after it for the next tick. An empty or
-missing cache directory imports nothing and succeeds.
+A tarball that fails to import does not stop the ones after it. The run tries
+every archive, names each one it could not import, and then exits non-zero, so
+the unit still reports the failure while the node gets every image the cache
+could still give it. An empty or missing cache directory imports nothing and
+succeeds.
+
+An archive that is already gone when its turn comes is skipped rather than
+reported. The agent takes a resource's directory away both to collect it and
+to swap a fresh extraction in, so an archive missing at that moment either is
+not wanted on the node any more or will be back for the next run. Neither is a
+failure. One that goes away after that check but before `ctr` opens it is a
+different and much rarer story, and it is reported like any other failed
+import, because nothing at that point can tell it from one.
+
+If nothing at all was left to import, the run says so on stderr and still
+exits zero: deciding that an empty cache is wrong is the caller's call, not
+this script's. A pipeline that reads "wrote to stderr" as "failed" will see
+that line, so read the exit status.
 
 ## Development
 

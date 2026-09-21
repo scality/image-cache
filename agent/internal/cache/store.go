@@ -14,6 +14,11 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 )
 
+// DefaultPath is where the cache lives unless something says otherwise. The
+// CRD defaults to it, the RPM's sysconfig ships it, and both the agent and
+// the command read it from here so that a change has one place to happen.
+const DefaultPath = "/var/lib/image-cache"
+
 // sentinelName marks a directory as fully extracted and agent-owned.
 // It is written last; garbage collection only considers directories
 // bearing it, so foreign content in a shared cache path is never touched.
@@ -177,6 +182,36 @@ func (s Store) Extract(
 			errors.WithDetail("swapping the directory into place"))
 	}
 	return nil
+}
+
+// SweepTemporaries removes the hidden temporary directories a previous
+// extraction of this resource left behind, and returns their names. Extract
+// cleans up after itself when it returns an error, but not when the process
+// is killed outright, and a leftover is the size of the image being written.
+//
+// Scoped to one name because a run for another resource may be in flight:
+// GC, which the agent calls, is the one that sweeps them all.
+func (s Store) SweepTemporaries(cachePath, name string) ([]string, error) {
+	entries, err := os.ReadDir(cachePath)
+	if err != nil {
+		return nil, errors.Wrap(ErrGC, errors.CausedBy(err),
+			errors.WithDetail("listing the cache path"))
+	}
+	prefix := "." + name + ".tmp-"
+	var removed []string
+	var errs []error
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		if rerr := os.RemoveAll(filepath.Join(cachePath, e.Name())); rerr != nil {
+			errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(rerr),
+				errors.WithProperty("directory", e.Name())))
+			continue
+		}
+		removed = append(removed, e.Name())
+	}
+	return removed, utilerrors.NewAggregate(errs)
 }
 
 // GC removes agent-owned directories (sentinel-bearing, plus stale hidden

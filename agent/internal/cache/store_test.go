@@ -285,3 +285,38 @@ func TestExtractReplacesExistingDir(t *testing.T) {
 		t.Errorf("sentinel digest = %q, want %q", sn.Digest, digestD2)
 	}
 }
+
+// An extraction killed outright leaves a temporary directory the size of the
+// image. On a node with no agent, nothing else would ever remove it.
+func TestSweepTemporariesRemovesOnlyThisResourcesLeftovers(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	mine, err := os.MkdirTemp(dir, ".worker.tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := os.MkdirTemp(dir, ".control-plane.tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "worker"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := s.SweepTemporaries(dir, "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0] != filepath.Base(mine) {
+		t.Errorf("removed = %v, want only %s", removed, filepath.Base(mine))
+	}
+	if _, err := os.Stat(mine); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("its own leftover survived: %v", err)
+	}
+	// A run for another resource may be in flight, and the finished directory
+	// is not a leftover.
+	for _, keep := range []string{other, filepath.Join(dir, "worker")} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Errorf("%s was swept: %v", keep, err)
+		}
+	}
+}

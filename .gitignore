@@ -43,3 +43,7 @@ Dockerfile.cross
 *.src.rpm
 rpmbuild/
 _build/
+
+# The imagecachectl binary is compiled into the RPM sources at build time.
+# `_build/` above already covers rpm/_build.
+rpm/sources/imagecachectl

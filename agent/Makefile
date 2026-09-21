@@ -117,6 +117,11 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager ./cmd/manager
 
+.PHONY: build-imagecachectl
+OUT ?= bin/imagecachectl
+build-imagecachectl: ## Build the imagecachectl binary into OUT (used by the RPM build).
+	go build -o $(OUT) ./cmd/imagecachectl
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/manager

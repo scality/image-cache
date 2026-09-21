@@ -74,16 +74,17 @@ missing cache directory imports nothing and succeeds.
 
 ## Development
 
-Docker is the only requirement. Everything builds and runs inside a Rocky Linux
-container, pinned by digest per major version, so the result does not depend on
-your host.
+The packaging runs inside a Rocky Linux container, pinned by digest per major
+version, so it does not depend on your host. Go is needed as well: the
+`imagecachectl` package wraps a binary compiled outside that container, which
+carries the packaging toolchain and no compiler.
 
 ```console
-make test EL=9       # shellcheck, the bats suites and rpmlint
-make rpm EL=9        # build into _build/, owned by you rather than by root
+make test EL=9       # shellcheck, the bats suites and rpmlint, for both packages
+make rpm EL=9        # build both into _build/, owned by you rather than by root
 make lint            # shellcheck and rpmlint alone
 make image EL=8      # just the toolchain image
-make clean           # remove _build/
+make clean           # remove _build/ and the binary staged for packaging
 ```
 
 `EL` selects the target, 8 or 9, and both are supported: keep out of any bash,

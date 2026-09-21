@@ -9,3 +9,15 @@ addFilter(r"spelling-error Summary\(en_US\) Pre")
 # The repository is private until it is open-sourced, so rpmlint cannot reach
 # the URL yet. Remove this filter once the repository is public.
 addFilter(r"invalid-url URL")
+# imagecachectl ships a single statically linked Go binary: that is the point,
+# it must run on a node that has nothing else, and there is no debuginfo
+# package to strip into.
+addFilter(r"statically-linked-binary")
+addFilter(r"unstripped-binary-or-object")
+# "kubelet" trips the dictionary but is the name of the thing.
+addFilter(r"spelling-error %description -l en_US kubelet")
+# Neither package compiles anything at rpmbuild time: one ships a script, the
+# other installs a binary the release workflow already built. There is nothing
+# to unpack and nothing to compile, so both sections are absent on purpose.
+addFilter(r"no-%prep-section")
+addFilter(r"no-%build-section")

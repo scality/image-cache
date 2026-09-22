@@ -163,6 +163,15 @@ func (s Store) Extract(
 		files = append(files, base)
 	}
 
+	// An image with nothing in it is a mistake upstream, not an empty cache
+	// to publish: the sentinel would report the resource complete, the node
+	// would be labelled synced, and it would hold none of the archives the
+	// resource was meant to give it.
+	if len(files) == 0 {
+		return errors.Wrap(ErrExtract,
+			errors.WithDetail("the image carries no file to cache"))
+	}
+
 	data, err := json.Marshal(sentinel{Digest: digest, Files: files})
 	if err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),

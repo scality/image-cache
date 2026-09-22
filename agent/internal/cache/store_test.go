@@ -370,3 +370,28 @@ func TestSweepTemporariesRemovesOnlyThisResourcesLeftovers(t *testing.T) {
 		}
 	}
 }
+
+// A carrier with nothing in it is refused rather than published. The sentinel
+// would say the resource is complete, the node would be labelled synced, and
+// it would hold none of the archives the resource was meant to give it.
+func TestExtractRefusesAnImageWithNothingToCache(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+
+	err := s.Extract(t.Context(), dir, "empty", "d", tarStream(t, map[string]string{}))
+	if err == nil {
+		t.Fatal("an image carrying no file was accepted")
+	}
+	if !strings.Contains(err.Error(), "no file to cache") {
+		t.Errorf("err = %v, want it to say what was found", err)
+	}
+	if st, _ := s.State(dir, "empty"); st != Absent {
+		t.Errorf("state = %v, want Absent: the refusal left something behind", st)
+	}
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the cache path is not empty after a refusal: %v", entries)
+	}
+}

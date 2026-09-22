@@ -286,6 +286,56 @@ func TestExtractReplacesExistingDir(t *testing.T) {
 	}
 }
 
+// The cache path is shared, and a name is not a claim on whatever happens to
+// sit under it. A resource named after a neighbour of the cache path, or a
+// cache path one level too high, would otherwise make the swap an rm -rf of
+// somebody else's data: the command that calls this runs as root on a node.
+func TestExtractRefusesADirectoryItDidNotWrite(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	foreign := filepath.Join(dir, "containers")
+	if err := os.MkdirAll(filepath.Join(foreign, "storage"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(foreign, "storage", "data.db")
+	if err := os.WriteFile(data, []byte("not ours"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.Extract(t.Context(), dir, "containers", "d",
+		tarStream(t, map[string]string{testTar: "1"}))
+	if err == nil {
+		t.Fatal("extraction was allowed over a directory without the sentinel")
+	}
+	if !errors.Is(err, ErrExtract) {
+		t.Errorf("err = %v, want ErrExtract", err)
+	}
+	got, rerr := os.ReadFile(data)
+	if rerr != nil {
+		t.Fatalf("the foreign data was destroyed: %v", rerr)
+	}
+	if string(got) != "not ours" {
+		t.Errorf("the foreign data was rewritten: %q", got)
+	}
+}
+
+// A file where the directory would go is refused the same way: os.RemoveAll
+// would have taken it without a word.
+func TestExtractRefusesAFileWhereTheDirectoryGoes(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	occupied := filepath.Join(dir, "taken")
+	if err := os.WriteFile(occupied, []byte("not ours"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Extract(t.Context(), dir, "taken", "d",
+		tarStream(t, map[string]string{testTar: "1"})); err == nil {
+		t.Fatal("extraction was allowed over a regular file")
+	}
+	if got, err := os.ReadFile(occupied); err != nil || string(got) != "not ours" {
+		t.Errorf("the file was replaced: %q, %v", got, err)
+	}
+}
+
 // An extraction killed outright leaves a temporary directory the size of the
 // image. On a node with no agent, nothing else would ever remove it.
 func TestSweepTemporariesRemovesOnlyThisResourcesLeftovers(t *testing.T) {

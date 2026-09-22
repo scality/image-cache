@@ -228,7 +228,7 @@ with a second implementation reading a docker archive on disk (the form the
 installation media carries, where there is no registry to reach), and the same
 store, so the layout and the sentinel are the agent's, not a second format.
 
-Two consequences worth stating:
+Three consequences worth stating:
 
 - **The name is the caller's.** It becomes the resource directory, and the
   agent recognises a resource by it. Given the name the `ImageCache` will
@@ -240,6 +240,12 @@ Two consequences worth stating:
   is the caller's to clean up, because nothing points the agent at it. The
   command validates the name as a DNS-1123 subdomain, the rule the API server
   applies to the resource, so the two cannot disagree on what a name is.
+- **It replaces only what the store wrote.** The swap that publishes a
+  resource removes whatever is at the destination first, so it refuses a
+  directory that does not bear the sentinel. The cache path is shared, and a
+  name is not a claim on what happens to sit under it: without the check, a
+  resource named after a neighbour of the cache path, or a cache path one
+  level too high, is an `rm -rf` of somebody else's data, run as root.
 - **It fills once.** The state of the directory decides, not a comparison
   against the registry: once a resource is complete the command reaches no
   registry, whatever the source now points at. Keeping a node up to date is

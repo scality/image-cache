@@ -428,6 +428,32 @@ func TestACachePathThatIsNotADirectoryIsNamed(t *testing.T) {
 	}
 }
 
+// The store refuses to replace what it did not write, and the command says so
+// rather than reporting success over content it left alone.
+func TestImportRefusesADirectoryItDidNotWrite(t *testing.T) {
+	cacheDir := t.TempDir()
+	foreign := filepath.Join(cacheDir, resourceName, "storage")
+	if err := os.MkdirAll(foreign, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(foreign, "data.db")
+	if err := os.WriteFile(data, []byte("not ours"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := archive(t, map[string][]byte{etcdTarPath: []byte("etcd")})
+
+	code, out, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, src)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (%s)", code, errOut)
+	}
+	if strings.Contains(out, "extracted") {
+		t.Errorf("stdout claims the import went through: %q", out)
+	}
+	if got, err := os.ReadFile(data); err != nil || string(got) != "not ours" {
+		t.Errorf("the foreign data did not survive: %q, %v", got, err)
+	}
+}
+
 // An import killed outright leaves a temporary directory the size of the
 // image, and this command runs where no agent will ever collect it.
 func TestImportSweepsItsOwnLeftovers(t *testing.T) {

@@ -173,6 +173,9 @@ func (s Store) Extract(
 			errors.WithDetail("writing the sentinel"))
 	}
 	final := s.dir(cachePath, name)
+	if err = s.replaceable(final, name); err != nil {
+		return err
+	}
 	if err = os.RemoveAll(final); err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("clearing the previous directory"))
@@ -180,6 +183,31 @@ func (s Store) Extract(
 	if err = os.Rename(tmp, final); err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("swapping the directory into place"))
+	}
+	return nil
+}
+
+// replaceable reports whether the swap may remove what is already at final.
+// Only a directory bearing the sentinel may be, which is the same rule GC
+// applies: the cache path is shared, and a name is not a claim on whatever
+// happens to sit under it. Without this, a resource named after a neighbour
+// of the cache path, or a cache path one level too high, turns the swap into
+// an rm -rf of somebody else's data.
+func (s Store) replaceable(final, name string) error {
+	if _, err := os.Stat(final); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("looking at the directory to replace"),
+			errors.WithProperty("resource", name))
+	}
+	if _, err := os.Stat(filepath.Join(final, sentinelName)); err != nil {
+		return errors.Wrap(ErrExtract,
+			errors.WithDetail("what is already there was not written by this, "+
+				"so it is left alone: remove it by hand if it should go"),
+			errors.WithProperty("resource", name),
+			errors.WithProperty("directory", final))
 	}
 	return nil
 }

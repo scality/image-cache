@@ -18,7 +18,7 @@ The fix is to keep a copy of the critical images on the node, outside
 containerd, in a form that can be restored without the network and without a
 working control plane.
 
-## Two components, one directory
+## Three components, one directory
 
 Restoring the cache and filling it are separate problems with separate
 lifetimes, so they are separate components:
@@ -37,8 +37,16 @@ lifetimes, so they are separate components:
   job, and keeping the two apart means the agent needs no privileged socket
   access.
 
+- **`imagecachectl`** (a command, in its own RPM) answers *fill* as well, but
+  once. A node being installed has no Kubernetes to run the agent in and needs
+  its images before the kubelet starts, so the same pull and the same
+  extraction are driven from a command. It reads a registry or a docker
+  archive, which is what a first node has instead of a registry. Once a
+  resource is complete it does nothing and reaches no registry: it reads the
+  marker the extraction left and checks the files it lists are still there.
+
 They communicate through the filesystem only, at `/var/lib/image-cache` by
-default. Neither knows the other exists, so either can be deployed alone:
+default. None of them knows the others exist, so each can be deployed alone:
 tarballs written by provisioning tooling get imported with no agent running,
 and a cluster that imports its cache some other way can still use the agent to
 maintain it.

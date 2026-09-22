@@ -23,6 +23,8 @@ cluster-scoped.
 ```
 api/v1alpha1/        the ImageCache types and the generated deepcopy
 cmd/manager/         flags, manager setup, what gets registered
+cmd/imagecachectl/   the one-shot command, wiring only
+internal/cli/        what that command does: parse, guard, pull, extract
 internal/controller/ the node reconciler, the filesystem watcher, the labels
 internal/cache/      the on-disk store: state, extraction, garbage collection
 internal/puller/     pulling an image and streaming its layers

@@ -217,6 +217,35 @@ client such as oras-go would bring no benefit here. The puller sits behind a
 small interface in its own package, so the implementation can change without
 touching the reconciler.
 
+## The one-shot command
+
+A node being installed has no Kubernetes to run the agent in, and its kubelet
+needs images before it starts. `imagecachectl` does one resource's worth of
+that work from a command, and ships in its own RPM.
+
+It is the same two pieces behind a different entry point: the puller above,
+with a second implementation reading a docker archive on disk (the form the
+installation media carries, where there is no registry to reach), and the same
+store, so the layout and the sentinel are the agent's, not a second format.
+
+Two consequences worth stating:
+
+- **The name is the caller's.** It becomes the resource directory, and the
+  agent recognises a resource by it. Given the name the `ImageCache` will
+  carry, the agent finds the sentinel, reads it as complete, and pulls
+  nothing. Given any other name, garbage collection removes the directory,
+  since it bears the agent's sentinel and nothing claims it. That only holds
+  under a cache path the agent scans, which is the default one plus the paths
+  declared by resources: a directory imported under `--cache-path /srv/images`
+  is the caller's to clean up, because nothing points the agent at it. The
+  command validates the name as a DNS-1123 subdomain, the rule the API server
+  applies to the resource, so the two cannot disagree on what a name is.
+- **It fills once.** The state of the directory decides, not a comparison
+  against the registry: once a resource is complete the command reaches no
+  registry, whatever the source now points at. Keeping a node up to date is
+  the agent's job, and a command that ran again on every convergence would be
+  a second, weaker one.
+
 ## Container image and deployment
 
 The agent ships as a distroless, rootless, amd64-only image:

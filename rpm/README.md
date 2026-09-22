@@ -12,6 +12,11 @@ between the two.
 
 All the commands below run from this directory.
 
+> This directory builds two packages. This page is about
+> `containerd-image-preload`; the other one wraps the `imagecachectl` command,
+> and the [root README](../README.md#the-import-command) covers what it does.
+> `make test` and `make rpm` build and check both.
+
 ## Installing
 
 The package targets Enterprise Linux 8 and 9, and requires `containerd`.

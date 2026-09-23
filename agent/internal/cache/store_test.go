@@ -15,6 +15,14 @@ import (
 // testTar is the file name used by fixtures that only need a single file.
 const testTar = "a.tar"
 
+// Archive paths as a cache image carries them, under a directory, and the
+// content fixtures give the first.
+const (
+	etcdEntry  = "images/etcd.tar"
+	pauseEntry = "images/pause.tar"
+	etcdBody   = "etcd"
+)
+
 // Digests used by the two-extraction replacement test.
 const (
 	digestD1 = "d1"
@@ -70,7 +78,7 @@ func tarStream(t *testing.T, files map[string]string) *bytes.Buffer {
 
 func TestExtractFlattensAndCompletes(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
-	stream := tarStream(t, map[string]string{"images/etcd.tar": "e", "images/pause.tar": "p"})
+	stream := tarStream(t, map[string]string{etcdEntry: "e", pauseEntry: "p"})
 	if err := s.Extract(t.Context(), dir, "worker-134-0-0", "sha256:abc", stream); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +108,7 @@ func TestExtractIgnoresAnImagesOwnSentinel(t *testing.T) {
 	// image must not end up describing the extraction.
 	dir, s := t.TempDir(), Store{}
 	stream := tarStream(t, map[string]string{
-		"images/etcd.tar":        "e",
+		etcdEntry:                "e",
 		"images/" + sentinelName: `{"digest":"sha256:evil","files":["etcd.tar"]}`,
 	})
 	if err := s.Extract(t.Context(), dir, "c", "sha256:abc", stream); err != nil {
@@ -121,7 +129,8 @@ func TestExtractIgnoresAnImagesOwnSentinel(t *testing.T) {
 func TestExtractConfinesHostileEntries(t *testing.T) {
 	// Entries come from an image, so they are attacker-controlled. Extraction
 	// keeps regular files only, by base name: nothing may land outside the
-	// resource directory, and no symlink, directory or device may be created.
+	// resource directory, and a directory entry creates nothing. Links and
+	// devices are refused outright, see TestExtractRefusesNonRegularEntries.
 	// These are the invariants a future rewrite must not lose.
 	dir, s := t.TempDir(), Store{}
 	outside := filepath.Join(dir, "escaped.tar")
@@ -129,12 +138,10 @@ func TestExtractConfinesHostileEntries(t *testing.T) {
 		[]tar.Header{
 			{Name: "../../escaped.tar", Mode: 0o644, Typeflag: tar.TypeReg},
 			{Name: "/etc/passwd", Mode: 0o644, Typeflag: tar.TypeReg},
-			{Name: "images/link.tar", Typeflag: tar.TypeSymlink, Linkname: "/etc/shadow"},
 			{Name: "images/subdir", Mode: 0o755, Typeflag: tar.TypeDir},
-			{Name: "images/dev", Mode: 0o644, Typeflag: tar.TypeChar, Devmajor: 1, Devminor: 3},
 			{Name: "images/honest.tar", Mode: 0o644, Typeflag: tar.TypeReg},
 		},
-		[]string{"escaped", "root:x:0:0", "", "", "", "h"},
+		[]string{"escaped", "root:x:0:0", "", "h"},
 	)
 	if err := s.Extract(t.Context(), dir, "c", "sha256:abc", stream); err != nil {
 		t.Fatal(err)
@@ -149,14 +156,93 @@ func TestExtractConfinesHostileEntries(t *testing.T) {
 			t.Errorf("%q missing from the resource directory: %v", name, err)
 		}
 	}
-	// Non-regular entries are skipped outright.
-	for _, name := range []string{"link.tar", "subdir", "dev"} {
-		if _, err := os.Lstat(filepath.Join(dir, "c", name)); !os.IsNotExist(err) {
-			t.Errorf("non-regular entry %q was created", name)
-		}
+	// A directory entry is only a container: nothing is created for it.
+	if _, err := os.Lstat(filepath.Join(dir, "c", "subdir")); !os.IsNotExist(err) {
+		t.Error("the directory entry was created")
 	}
 	if st, _ := s.State(dir, "c"); st != Complete {
 		t.Errorf("state = %v, want Complete", st)
+	}
+}
+
+// Two entry types look unusual and are not a reason to refuse an image. A
+// global header describes the archive rather than any file in it, and the
+// reader returns it as a header of its own. A contiguous file is a regular
+// file with a legacy type byte. Refusing either would turn away an image that
+// carries everything it was built to.
+func TestExtractAcceptsGlobalHeadersAndContiguousFiles(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	stream := hostileTarStream(t,
+		[]tar.Header{
+			{Name: "pax_global_header", Typeflag: tar.TypeXGlobalHeader, PAXRecords: map[string]string{"comment": "c0ffee"}},
+			{Name: etcdEntry, Mode: 0o644, Typeflag: tar.TypeCont},
+			{Name: pauseEntry, Mode: 0o644, Typeflag: tar.TypeReg},
+		},
+		[]string{"", etcdBody, "pause"},
+	)
+	if err := s.Extract(t.Context(), dir, "c", "d", stream); err != nil {
+		t.Fatalf("a legitimate image was refused: %v", err)
+	}
+	for name, want := range map[string]string{"etcd.tar": etcdBody, "pause.tar": "pause"} {
+		got, err := os.ReadFile(filepath.Join(dir, "c", name))
+		if err != nil || string(got) != want {
+			t.Errorf("%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "c", "pax_global_header")); !os.IsNotExist(err) {
+		t.Error("the global header was written out as a file")
+	}
+}
+
+// A link or a device in the image cannot be taken as a file, and skipping it
+// would publish a resource short of an archive while the sentinel calls it
+// complete. docker build copies a symbolic link as it finds it, dangling when
+// it pointed outside the build context, so the node would be labelled synced
+// without the image. The whole image is refused, naming the entry, and nothing
+// is left behind: no link, no partial directory, no temporary.
+func TestExtractRefusesNonRegularEntries(t *testing.T) {
+	for _, tc := range []struct {
+		entry tar.Header
+		kind  string
+	}{
+		{tar.Header{Name: pauseEntry, Typeflag: tar.TypeSymlink, Linkname: "../elsewhere/pause.tar"}, "a symbolic link"},
+		{tar.Header{Name: "images/etcd-copy.tar", Typeflag: tar.TypeLink, Linkname: etcdEntry}, "a hard link"},
+		{tar.Header{Name: "images/dev", Mode: 0o644, Typeflag: tar.TypeChar, Devmajor: 1, Devminor: 3}, "a device"},
+		{tar.Header{Name: "images/pipe", Mode: 0o644, Typeflag: tar.TypeFifo}, "a named pipe"},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			dir, s := t.TempDir(), Store{}
+			// A regular file first, so the refusal comes with something
+			// already written that has to be taken back.
+			stream := hostileTarStream(t,
+				[]tar.Header{
+					{Name: etcdEntry, Mode: 0o644, Typeflag: tar.TypeReg},
+					tc.entry,
+				},
+				[]string{etcdBody, ""},
+			)
+
+			err := s.Extract(t.Context(), dir, "c", "d", stream)
+			if err == nil {
+				t.Fatal("an image carrying " + tc.kind + " was accepted")
+			}
+			if !errors.Is(err, ErrExtract) {
+				t.Errorf("err = %v, want ErrExtract", err)
+			}
+			if !strings.Contains(err.Error(), tc.entry.Name) || !strings.Contains(err.Error(), tc.kind) {
+				t.Errorf("err = %v, want it to name %q as %s", err, tc.entry.Name, tc.kind)
+			}
+			if st, _ := s.State(dir, "c"); st != Absent {
+				t.Errorf("state = %v, want Absent", st)
+			}
+			entries, rerr := os.ReadDir(dir)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			if len(entries) != 0 {
+				t.Errorf("the refusal left %v behind", entries)
+			}
+		})
 	}
 }
 

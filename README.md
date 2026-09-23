@@ -199,7 +199,7 @@ docker build --platform linux/amd64 -t registry.example.com/my-boot-cache-worker
 docker push registry.example.com/my-boot-cache-worker:1.0.0
 ```
 
-Three things the agent expects:
+Four things the agent expects:
 
 - **A `linux/amd64` image.** It resolves the reference for that platform and
   no other, which is also why the build above pins it. An archive read by
@@ -211,6 +211,11 @@ Three things the agent expects:
 - **`FROM scratch`, or something equally empty.** Every regular file of the
   flattened image lands in the cache directory, so a conventional base image
   would pour its whole filesystem in there.
+- **Regular files only.** A symbolic link, a hard link or a device in the
+  image refuses it whole, naming the entry. `docker build` copies a link as it
+  finds it, so an archive linked into the build context from elsewhere would
+  otherwise reach the node as a link to nothing, and the cache would look
+  complete without it. Directories are fine.
 
 The layout inside the image does not matter, since only base names survive.
 Files that do not end in `.tar` are extracted too, but the preload service

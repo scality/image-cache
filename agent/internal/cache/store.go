@@ -5,6 +5,7 @@ import (
 	"archive/tar"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -90,7 +91,8 @@ func (s Store) State(cachePath, name string) (State, error) {
 }
 
 // Extract writes the regular files of the tar stream into the resource
-// directory, flattened to their base names, then the sentinel, then swaps
+// directory, flattened to their base names, skipping directories and refusing
+// the whole stream on any other kind of entry, then the sentinel, then swaps
 // the directory into place. The swap is remove-then-rename (a rename cannot
 // replace an existing directory), so a crash mid-swap can transiently leave
 // the resource Absent; the next pass redoes the extraction. Extract must not
@@ -129,8 +131,29 @@ func (s Store) Extract(
 			return errors.Wrap(ErrExtract, errors.CausedBy(rerr),
 				errors.WithDetail("reading the image filesystem"))
 		}
-		if hdr.Typeflag != tar.TypeReg {
+		switch hdr.Typeflag {
+		// A contiguous file is a regular file to every reader that does not
+		// special-case it, content included.
+		case tar.TypeReg, tar.TypeCont:
+		// A directory is only a container for the files below it, and those
+		// land flat. A global header describes the archive, not an entry in
+		// it: git archive writes one, and the reader hands it back as its own
+		// header.
+		case tar.TypeDir, tar.TypeXGlobalHeader:
 			continue
+		default:
+			// A link or a device is not written out, and dropping it without a
+			// word would publish a resource short of an archive the image was
+			// built to carry: the sentinel would call it complete, the node would be
+			// labelled synced, and the gap would show the day the kubelet needs
+			// that image with no registry to fall back on. docker build copies
+			// a symbolic link as it finds it, dangling if it pointed outside the
+			// build context, so the image is refused whole instead. A hard link
+			// could be recreated from its target, but the Salt module this
+			// replaces refused it too, and a boot cache image has no use for
+			// one.
+			return errors.Wrap(ErrExtract,
+				errors.WithDetailf("%q is %s, not a regular file", hdr.Name, entryKind(hdr.Typeflag)))
 		}
 		// Base names only: an entry cannot escape the directory, whatever
 		// path the image carries. The sentinel name is ours, and is written
@@ -194,6 +217,22 @@ func (s Store) Extract(
 			errors.WithDetail("swapping the directory into place"))
 	}
 	return nil
+}
+
+// entryKind names a tar entry type the way an operator would read it.
+func entryKind(flag byte) string {
+	switch flag {
+	case tar.TypeSymlink:
+		return "a symbolic link"
+	case tar.TypeLink:
+		return "a hard link"
+	case tar.TypeChar, tar.TypeBlock:
+		return "a device"
+	case tar.TypeFifo:
+		return "a named pipe"
+	default:
+		return fmt.Sprintf("an entry of tar type %q", flag)
+	}
 }
 
 // replaceable reports whether the swap may remove what is already at final.

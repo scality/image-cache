@@ -118,8 +118,15 @@ complete and agent-owned:
 
 The name is the agent's own: an entry carrying it inside a cache image is
 skipped, so the sentinel always describes what the agent extracted. Entries
-are extracted by base name and only regular files are kept, so nothing in an
-image can write outside its directory.
+are extracted by base name, so nothing in an image can write outside its
+directory. Directory entries are skipped, since everything lands flat, and any
+other kind of entry refuses the image whole. A symbolic link or a device is
+not written out, and skipping it would publish a resource short of an archive
+while the sentinel calls it complete. `docker build` copies a symbolic link as
+it finds it, dangling if it pointed outside the build context, which is how
+that would happen. A hard link could be recreated from its target, but the
+Salt module this replaces refused it as well, and a boot cache image has no
+use for one.
 
 Extraction is atomic for a first extraction: layers are extracted to a
 temporary directory next to the target, the sentinel is written, then the

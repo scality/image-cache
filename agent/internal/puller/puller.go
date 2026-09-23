@@ -8,7 +8,6 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/scality/go-errors"
@@ -25,10 +24,12 @@ var (
 	ErrPull = errors.New("pulling the image failed")
 )
 
-// Puller resolves an image reference and returns its flattened filesystem.
+// Puller resolves an image reference and returns the entries of its layers.
 type Puller interface {
-	// Pull returns the image's flattened filesystem as a tar stream and the
-	// resolved image digest. The caller closes the stream.
+	// Pull returns the entries of the image's layers, in layer order and as
+	// the layers carry them, as one tar stream, and the resolved image digest.
+	// Nothing is filtered out on the way, see entries. The caller closes the
+	// stream.
 	Pull(ctx context.Context, ref string) (io.ReadCloser, string, error)
 }
 
@@ -54,7 +55,7 @@ func (Remote) Pull(ctx context.Context, ref string) (io.ReadCloser, string, erro
 		return nil, "", errors.Wrap(ErrPull, errors.CausedBy(err),
 			errors.WithDetail("resolving the digest"), errors.WithProperty("source", ref))
 	}
-	return mutate.Extract(img), digest.String(), nil
+	return entries(img), digest.String(), nil
 }
 
 // Tarball reads an image out of a docker archive on the local filesystem,
@@ -107,5 +108,5 @@ func (Tarball) Pull(ctx context.Context, ref string) (io.ReadCloser, string, err
 		return nil, "", errors.Wrap(ErrPull, errors.CausedBy(err),
 			errors.WithDetail("resolving the digest"), errors.WithProperty("source", ref))
 	}
-	return mutate.Extract(img), digest.String(), nil
+	return entries(img), digest.String(), nil
 }

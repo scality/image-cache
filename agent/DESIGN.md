@@ -211,8 +211,13 @@ leave a finalizer behind and block the deletion forever.
 Pulling and extraction use
 [go-containerregistry](https://github.com/google/go-containerregistry):
 
-- Pulling an image and walking its layers is its core use case; the flattened
-  filesystem comes out of `mutate.Extract`.
+- Pulling an image and walking its layers is its core use case. The layers
+  are read one after the other and their entries passed on as they are, not
+  through `mutate.Extract`: that one flattens the image, and on the way it
+  drops every relative link whose target leaves the image root, which is the
+  one link the store most needs to refuse. A boot cache image is built from
+  scratch and only adds files, so the flattening buys nothing, and a layer
+  that deletes a file of an earlier one is refused instead.
 - Multi-arch indexes are resolved client-side (`remote.WithPlatform`), which
   is exactly what a static, spec-compliant registry expects from its clients.
 - Its in-memory registry (`pkg/registry`) lets tests exercise the real pull

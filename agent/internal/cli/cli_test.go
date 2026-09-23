@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -11,6 +14,9 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/scality/image-cache/agent/internal/cache"
 )
 
@@ -473,5 +479,66 @@ func TestImportSweepsItsOwnLeftovers(t *testing.T) {
 	}
 	if _, err := os.Stat(leftover); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the leftover survived the import: %v", err)
+	}
+}
+
+// The whole chain, archive to cache directory, on the case the store's refusal
+// exists for. A boot cache image built from a context holding a link to an
+// archive outside it carries a link that leaves the image root. Flattening the
+// image with mutate.Extract dropped that link before the store could see it,
+// so the import succeeded and the resource read complete without the archive.
+// It has to fail instead, naming the entry, and leave nothing behind.
+func TestImportRefusesAnArchiveLinkedFromOutsideTheImage(t *testing.T) {
+	cacheDir := t.TempDir()
+	buf := &bytes.Buffer{}
+	tw := tar.NewWriter(buf)
+	for _, e := range []struct {
+		hdr  tar.Header
+		body string
+	}{
+		{tar.Header{Name: "images/", Typeflag: tar.TypeDir, Mode: 0o755}, ""},
+		{tar.Header{Name: etcdTarPath, Typeflag: tar.TypeReg, Mode: 0o644}, "etcd"},
+		{tar.Header{Name: "images/pause.tar", Typeflag: tar.TypeSymlink, Linkname: "../../shared/pause.tar"}, ""},
+	} {
+		e.hdr.Size = int64(len(e.body))
+		if err := tw.WriteHeader(&e.hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(e.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+	layer, err := tarball.LayerFromOpener(func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(raw)), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := mutate.AppendLayers(empty.Image, layer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(t.TempDir(), "boot-cache.tar")
+	if err := crane.Save(img, "boot-cache/worker:1.0.0", src); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, src)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stdout %q)", code, out)
+	}
+	if !strings.Contains(errOut, "images/pause.tar") || !strings.Contains(errOut, "symbolic link") {
+		t.Errorf("stderr = %q, want the link named", errOut)
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the refusal left %v behind", entries)
 	}
 }

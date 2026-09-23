@@ -205,12 +205,13 @@ Four things the agent expects:
   no other, which is also why the build above pins it. An archive read by
   `imagecachectl` is checked the same way, so an image saved on an arm64
   machine is refused instead of filling an x86_64 node's cache.
-- **Unique file names.** The image filesystem is flattened to base names, so
-  two files called `app.tar` sitting in different directories fail the
-  extraction instead of overwriting each other.
+- **Unique file names.** Every file lands flat, under its base name, so two
+  files called `app.tar`, in different directories or written by different
+  layers, fail the extraction instead of overwriting each other.
 - **`FROM scratch`, or something equally empty.** Every regular file of the
-  flattened image lands in the cache directory, so a conventional base image
-  would pour its whole filesystem in there.
+  image lands in the cache directory, so a conventional base image would pour
+  its whole filesystem in there. A layer that deletes a file of an earlier one
+  is refused.
 - **Regular files only.** A symbolic link, a hard link or a device in the
   image refuses it whole, naming the entry. `docker build` copies a link as it
   finds it, so an archive linked into the build context from elsewhere would

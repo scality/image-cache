@@ -165,6 +165,29 @@ func TestExtractConfinesHostileEntries(t *testing.T) {
 	}
 }
 
+// An entry whose name has no file name to land under is refused whole, and
+// said to be what it is. Opening it would hit the temporary directory or its
+// parent: nothing escapes, but the failure used to read as a duplicate.
+func TestExtractRefusesAnEntryWithNoFileName(t *testing.T) {
+	for _, name := range []string{"", ".", "..", "images/.", "images/.."} {
+		dir, s := t.TempDir(), Store{}
+		stream := hostileTarStream(t,
+			[]tar.Header{
+				{Name: etcdEntry, Mode: 0o644, Typeflag: tar.TypeReg},
+				{Name: name, Mode: 0o644, Typeflag: tar.TypeReg},
+			},
+			[]string{etcdBody, "x"},
+		)
+		err := s.Extract(t.Context(), dir, "c", "d", stream)
+		if err == nil || !strings.Contains(err.Error(), "has no file name") {
+			t.Errorf("%q: err = %v, want it refused for having no file name", name, err)
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Errorf("%q: the refusal left %v behind", name, entries)
+		}
+	}
+}
+
 // Two entry types look unusual and are not a reason to refuse an image. A
 // global header describes the archive rather than any file in it, and the
 // reader returns it as a header of its own. A contiguous file is a regular

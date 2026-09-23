@@ -160,6 +160,13 @@ func (s Store) Extract(
 		// below; an image shipping that name would just be overwritten, so
 		// skip it rather than pretend it was extracted.
 		base := filepath.Base(hdr.Name)
+		// A name that is empty or all dots has no file name to land under:
+		// opening it would hit the temporary directory or its parent, and the
+		// failure would read as a duplicate rather than as what it is.
+		if base == "." || base == ".." || base == string(filepath.Separator) {
+			return errors.Wrap(ErrExtract,
+				errors.WithDetailf("%q has no file name", hdr.Name))
+		}
 		if base == sentinelName {
 			continue
 		}

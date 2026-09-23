@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -502,5 +504,45 @@ func TestExtractRefusesAnImageWithNothingToCache(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("the cache path is not empty after a refusal: %v", entries)
+	}
+}
+
+// eofAfter returns r's content, then fails with an error that wraps io.EOF,
+// the way a registry closing the connection before a layer comes back:
+// Get "...": EOF.
+type eofAfter struct{ r io.Reader }
+
+func (e eofAfter) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		return n, fmt.Errorf(`Get "https://registry.example/v2/boot-cache/blobs/sha256:0": %w`, io.EOF)
+	}
+	return n, err
+}
+
+// A failure that wraps io.EOF is not the end of the archive. Taken for it,
+// the extraction published what had arrived so far as a complete resource:
+// the first layer's archives, and nothing of the layers after it.
+func TestExtractRefusesAStreamEndingInAWrappedEOF(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	buf := &bytes.Buffer{}
+	tw := tar.NewWriter(buf)
+	if err := tw.WriteHeader(&tar.Header{Name: etcdEntry, Mode: 0o644, Typeflag: tar.TypeReg, Size: int64(len(etcdBody))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(etcdBody)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// No trailer: the stream fails right after the first entry.
+
+	err := s.Extract(t.Context(), dir, "c", "d", eofAfter{buf})
+	if err == nil {
+		t.Fatal("a stream that failed was published as complete")
+	}
+	if st, _ := s.State(dir, "c"); st != Absent {
+		t.Errorf("state = %v, want Absent", st)
 	}
 }

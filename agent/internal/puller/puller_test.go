@@ -76,7 +76,7 @@ func TestRemotePullStreamsTheImageFiles(t *testing.T) {
 	tr := tar.NewReader(rc)
 	for {
 		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF { //nolint:errorlint // the end of an archive is the unwrapped value
 			break
 		}
 		if err != nil {
@@ -155,7 +155,7 @@ func TestRemotePullResolvesMultiArchIndex(t *testing.T) {
 	tr := tar.NewReader(rc)
 	for {
 		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF { //nolint:errorlint // the end of an archive is the unwrapped value
 			break
 		}
 		if err != nil {
@@ -289,7 +289,7 @@ func TestTarballPullStreamsTheImageFiles(t *testing.T) {
 	tr := tar.NewReader(rc)
 	for {
 		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF { //nolint:errorlint // the end of an archive is the unwrapped value
 			break
 		}
 		if err != nil {
@@ -467,7 +467,7 @@ func readAll(t *testing.T, rc io.ReadCloser) ([]*tar.Header, error) {
 	tr := tar.NewReader(rc)
 	for {
 		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF { //nolint:errorlint // the end of an archive is the unwrapped value
 			return hdrs, nil
 		}
 		if err != nil {
@@ -680,7 +680,7 @@ func drainArchive(rc io.ReadCloser) error {
 	tr := tar.NewReader(rc)
 	for {
 		_, err := tr.Next()
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF { //nolint:errorlint // the end of an archive is the unwrapped value
 			return nil
 		}
 		if err != nil {

@@ -71,7 +71,9 @@ func copyEntries(layer v1.Layer, tw *tar.Writer) (err error) {
 	tr := tar.NewReader(rc)
 	for {
 		hdr, rerr := tr.Next()
-		if errors.Is(rerr, io.EOF) {
+		// Identity, as in the store: a read failure that wraps io.EOF is not
+		// the end of this layer.
+		if rerr == io.EOF { //nolint:errorlint // only the unwrapped value means the end
 			// The end of the tar archive is not the end of the layer: padding
 			// and, for a pulled layer, the rest of the compressed stream follow.
 			// The layer's digest is checked only once that has been read, so

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ const (
 	importCmd    = "import"
 	nameFlag     = "--name"
 	etcdTarPath  = "images/etcd.tar"
+	pauseTarPath = "images/pause.tar"
 	sentinelName = ".image-cache-agent.json"
 )
 
@@ -87,7 +89,7 @@ func TestImportFromAnArchive(t *testing.T) {
 
 func TestImportFromARegistry(t *testing.T) {
 	cacheDir := t.TempDir()
-	ref := served(t, map[string][]byte{"images/pause.tar": []byte("pause")})
+	ref := served(t, map[string][]byte{pauseTarPath: []byte("pause")})
 
 	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, ref)
 	if code != 0 {
@@ -498,7 +500,7 @@ func TestImportRefusesAnArchiveLinkedFromOutsideTheImage(t *testing.T) {
 	}{
 		{tar.Header{Name: "images/", Typeflag: tar.TypeDir, Mode: 0o755}, ""},
 		{tar.Header{Name: etcdTarPath, Typeflag: tar.TypeReg, Mode: 0o644}, "etcd"},
-		{tar.Header{Name: "images/pause.tar", Typeflag: tar.TypeSymlink, Linkname: "../../shared/pause.tar"}, ""},
+		{tar.Header{Name: pauseTarPath, Typeflag: tar.TypeSymlink, Linkname: "../../shared/pause.tar"}, ""},
 	} {
 		e.hdr.Size = int64(len(e.body))
 		if err := tw.WriteHeader(&e.hdr); err != nil {
@@ -531,7 +533,7 @@ func TestImportRefusesAnArchiveLinkedFromOutsideTheImage(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 (stdout %q)", code, out)
 	}
-	if !strings.Contains(errOut, "images/pause.tar") || !strings.Contains(errOut, "symbolic link") {
+	if !strings.Contains(errOut, pauseTarPath) || !strings.Contains(errOut, "symbolic link") {
 		t.Errorf("stderr = %q, want the link named", errOut)
 	}
 	entries, err := os.ReadDir(cacheDir)
@@ -540,5 +542,53 @@ func TestImportRefusesAnArchiveLinkedFromOutsideTheImage(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("the refusal left %v behind", entries)
+	}
+}
+
+// The case the identity check in the store exists for, end to end. The image
+// has two layers, and the registry closes the connection when the second is
+// asked for. The error that comes back wraps io.EOF, and read as the end of
+// the archive it let the import report success with the first layer's
+// archives only: exit 0, a sentinel calling the resource complete, pause.tar
+// missing. It has to fail and leave nothing behind.
+func TestImportFailsWhenALayerCannotBeFetched(t *testing.T) {
+	base, err := crane.Image(map[string][]byte{etcdTarPath: []byte("etcd")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	top, err := crane.Layer(map[string][]byte{pauseTarPath: []byte("pause")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := mutate.AppendLayers(base, top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	topDigest, err := top.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.New()
+	direct := httptest.NewServer(reg)
+	t.Cleanup(direct.Close)
+	if err := crane.Push(img, strings.TrimPrefix(direct.URL, "http://")+"/boot-cache/worker:1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	cutting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/blobs/"+topDigest.String()) {
+			panic(http.ErrAbortHandler)
+		}
+		reg.ServeHTTP(w, r)
+	}))
+	t.Cleanup(cutting.Close)
+	cacheDir := t.TempDir()
+
+	code, out, _ := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir,
+		strings.TrimPrefix(cutting.URL, "http://")+"/boot-cache/worker:1.0.0")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (stdout %q)", code, out)
+	}
+	if entries, err := os.ReadDir(cacheDir); err != nil || len(entries) != 0 {
+		t.Errorf("the failed import left %v behind (%v)", entries, err)
 	}
 }

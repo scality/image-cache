@@ -124,7 +124,12 @@ func (s Store) Extract(
 			return cerr
 		}
 		hdr, rerr := tr.Next()
-		if errors.Is(rerr, io.EOF) {
+		// Identity, not errors.Is. archive/tar ends an archive with io.EOF
+		// itself, while a failure upstream can wrap one: a registry closing
+		// the connection before a layer comes back as Get "...": EOF. Taken
+		// for the end, it published whatever the earlier layers held as a
+		// complete resource, the rest silently missing.
+		if rerr == io.EOF { //nolint:errorlint // see above: only the unwrapped value means the end
 			break
 		}
 		if rerr != nil {

@@ -195,7 +195,7 @@ func (r *NodeReconciler) adopt(ctx context.Context, ic *imagecachev1alpha1.Image
 			errors.WithDetail("resolving the image a seeded directory is checked against"))
 	}
 	if rec.Config == "" || rec.Config != id.Config {
-		log.Info("the seeded directory holds another image, replacing it",
+		log.Info("Seeded cache directory holds another image, replacing it",
 			"recorded", rec.Config, "wanted", id.Config)
 		return false, nil
 	}
@@ -203,8 +203,8 @@ func (r *NodeReconciler) adopt(ctx context.Context, ic *imagecachev1alpha1.Image
 		return false, errors.Wrap(ErrSync, errors.CausedBy(err))
 	}
 	r.Recorder.Eventf(ic, nil, corev1.EventTypeNormal, "Adopted", "Adopt",
-		"adopted the directory %s seeded on node %s", rec.Owner, r.NodeName)
-	log.Info("adopted a seeded cache directory", "owner", rec.Owner)
+		"adopted the cache directory of %s, seeded by %s, on node %s", ic.Name, rec.Owner, r.NodeName)
+	log.Info("Adopted a seeded cache directory", "owner", rec.Owner)
 	return true, nil
 }
 

@@ -86,6 +86,8 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	fs.Usage = func() {}
 	name := fs.String("name", "", "name of the ImageCache resource this content belongs to")
 	cachePath := fs.String("cache-path", cache.DefaultPath, "directory the archives are extracted under")
+	caFile := fs.String("ca-file", "",
+		"PEM file of CA certificates to trust for the registry, on top of the system ones")
 
 	switch {
 	case len(args) == 0:
@@ -148,7 +150,7 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 		return 2
 	}
 
-	if err := do(ctx, *cachePath, *name, fs.Arg(0), out, errOut); err != nil {
+	if err := do(ctx, *cachePath, *name, fs.Arg(0), *caFile, out, errOut); err != nil {
 		// An interrupted run is not a failure to diagnose. The extraction
 		// publishes by rename, so nothing half written is left behind.
 		if errors.Is(err, context.Canceled) {
@@ -163,8 +165,16 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	return 0
 }
 
-func do(ctx context.Context, cachePath, name, source string, out, errOut io.Writer) error {
+func do(ctx context.Context, cachePath, name, source, caFile string, out, errOut io.Writer) error {
 	store := cache.Store{}
+
+	// Before the cache state, so that a CA that cannot be used is reported
+	// on every run, including one that would have found the resource
+	// complete, rather than only on the run that finally needs the registry.
+	src, err := pullerFor(source, caFile)
+	if err != nil {
+		return err
+	}
 
 	// Checked before anything reads through it, so that an unusable path is
 	// named as one. Asking the store first would report a path that is a
@@ -211,7 +221,7 @@ func do(ctx context.Context, cachePath, name, source string, out, errOut io.Writ
 			len(swept))
 	}
 
-	content, digest, err := pullerFor(source).Pull(ctx, source)
+	content, digest, err := src.Pull(ctx, source)
 	if err != nil {
 		return err
 	}
@@ -243,13 +253,15 @@ func do(ctx context.Context, cachePath, name, source string, out, errOut io.Writ
 // command runs as root during provisioning, often from a directory it does
 // not own. Shape alone also means a path that is not there fails naming the
 // file rather than coming back with a complaint about a reference.
-func pullerFor(source string) puller.Puller {
+//
+// The CA only matters to a registry, so an archive never reads it.
+func pullerFor(source, caFile string) (puller.Puller, error) {
 	switch {
 	case strings.HasPrefix(source, string(os.PathSeparator)),
 		strings.HasPrefix(source, "."),
 		strings.HasSuffix(source, ".tar"):
-		return puller.Tarball{}
+		return puller.Tarball{}, nil
 	default:
-		return puller.Remote{}
+		return puller.NewRemote(caFile)
 	}
 }

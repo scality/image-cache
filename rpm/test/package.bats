@@ -10,6 +10,15 @@ setup_file() {
     export RPM
 }
 
+# A linter's whole value is its diagnostic, and `run` captures it instead of
+# letting CI show it. Let the message out before asserting on the status.
+assert_linter_clean() {
+    if [ "$status" -ne 0 ]; then
+        echo "$output" >&2
+    fi
+    [ "$status" -eq 0 ]
+}
+
 @test "package name is containerd-image-preload" {
     [ "$(rpm -qp --qf '%{NAME}' "$RPM")" = "$NAME" ]
 }
@@ -45,7 +54,7 @@ setup_file() {
 @test "rpmlint reports no errors or warnings" {
     cd "${BATS_TEST_DIRNAME}/.."
     run rpmlint -f rpmlintrc "$RPM"
-    [ "$status" -eq 0 ]
+    assert_linter_clean
 }
 
 @test "installed script is executable" {
@@ -68,7 +77,23 @@ setup_file() {
 @test "shell scripts pass shellcheck" {
     cd "${BATS_TEST_DIRNAME}/.."
     run shellcheck "sources/$NAME.sh" build.sh
-    [ "$status" -eq 0 ]
+    assert_linter_clean
+}
+
+@test "bats files pass shellcheck" {
+    # ShellCheck learned to parse bats in 0.9.0, and Rocky 8 ships 0.6.0, which
+    # stops at the first @test. The gate holds on the EL9 leg of the matrix.
+    local version
+    version="$(shellcheck --version | awk '/^version:/ { print $2 }')"
+    # An empty version means no shellcheck at all, which must fail rather than
+    # turn this gate into a silent skip.
+    [ -n "$version" ]
+    if [ "$(printf '%s\n0.9.0\n' "$version" | sort -V | head -n 1)" != "0.9.0" ]; then
+        skip "shellcheck $version predates bats support"
+    fi
+    cd "${BATS_TEST_DIRNAME}/.."
+    run shellcheck test/*.bats
+    assert_linter_clean
 }
 
 @test "a release tag is normalized into a valid RPM version" {

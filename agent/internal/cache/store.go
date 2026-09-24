@@ -20,9 +20,10 @@ import (
 // the command read it from here so that a change has one place to happen.
 const DefaultPath = "/var/lib/image-cache"
 
-// sentinelName marks a directory as fully extracted and agent-owned.
-// It is written last; garbage collection only considers directories
-// bearing it, so foreign content in a shared cache path is never touched.
+// sentinelName marks a directory as fully extracted by the store, and names
+// who wrote it. It is written last; garbage collection only considers
+// directories bearing it, and among those only the agent's, so foreign
+// content in a shared cache path is never touched.
 const sentinelName = ".image-cache-agent.json"
 
 // Failures of this package are classified by these sentinels. Filesystem and
@@ -341,9 +342,11 @@ func entryKind(flag byte) string {
 }
 
 // replaceable reports whether the swap may remove what is already at final.
-// Only a directory bearing the sentinel may be, which is the same rule GC
-// applies: the cache path is shared, and a name is not a claim on whatever
-// happens to sit under it. Without this, a resource named after a neighbour
+// Only a directory bearing the sentinel may be, whoever wrote it: the cache
+// path is shared, and a name is not a claim on whatever happens to sit under
+// it, but a directory the store wrote under the resource's own name is that
+// resource's content to refresh. GC is stricter and also asks for the agent
+// as the writer, since it acts on names no resource claims. Without this, a resource named after a neighbour
 // of the cache path, or a cache path one level too high, turns the swap into
 // an rm -rf of somebody else's data.
 func (s Store) replaceable(final, name string) error {
@@ -413,8 +416,8 @@ func (Store) agentOwned(dir string) bool {
 	return sn.Owner == "" || sn.Owner == OwnerAgent
 }
 
-// GC removes agent-owned directories (sentinel-bearing, plus stale hidden
-// temporaries) under cachePath whose name is not in keep. Flat files and
+// GC removes agent-owned directories (those whose sentinel names the agent,
+// plus stale hidden temporaries) under cachePath whose name is not in keep. Flat files and
 // foreign directories survive, and so does a directory whose sentinel names
 // another owner: a node seeded before the agent arrived keeps its cache until
 // a resource claims it, whatever order the agent and the resources land in.

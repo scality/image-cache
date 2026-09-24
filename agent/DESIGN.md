@@ -123,7 +123,7 @@ complete and agent-owned:
   image.
 
 The name is the agent's own: an entry carrying it inside a cache image is
-skipped, so the sentinel always describes what the agent extracted. Entries
+skipped, so the sentinel always describes what the store extracted. Entries
 are extracted by base name, so nothing in an image can write outside its
 directory. Directory entries are skipped, since everything lands flat, and any
 other kind of entry refuses the image whole. A symbolic link or a device is
@@ -143,8 +143,10 @@ A crash before the rename leaves a hidden `.<name>.tmp-*` directory next to
 the target; garbage collection removes it on a later pass, the same as an
 orphaned resource directory.
 
-A resource whose directory is complete is never re-pulled: `spec.source` is
-effectively immutable once synced. Publishing new content means creating a
+A resource whose directory is complete and written by the agent is never
+re-pulled: `spec.source` is effectively immutable once synced. A directory
+`imagecachectl` seeded is checked once against `spec.source` before the agent
+takes it over, see the one-shot command below. Publishing new content means creating a
 new ImageCache (the name carries the version), not editing an existing one.
 
 ## Reconciliation model

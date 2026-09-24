@@ -196,7 +196,7 @@ func do(ctx context.Context, cachePath, name, source string, out, errOut io.Writ
 			len(swept))
 	}
 
-	if err := fill.Fill(ctx, store, pullerFor(source), cachePath, name, source, func(cerr error) {
+	if err := fill.Fill(ctx, store, pullerFor(source), cachePath, name, source, cache.OwnerCommand, func(cerr error) {
 		printf(errOut, "imagecachectl: closing the image stream: %s\n", cerr)
 	}); err != nil {
 		return err

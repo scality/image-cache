@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/scality/image-cache/agent/internal/cache"
@@ -69,7 +70,7 @@ func TestCheckCachePath(t *testing.T) {
 func TestFillExtractsAndClosesTheStream(t *testing.T) {
 	dir := t.TempDir()
 	p := &stubPuller{entries: map[string]string{"images/etcd.tar": "etcd"}}
-	if err := Fill(t.Context(), cache.Store{}, p, dir, resource, "ref", nil); err != nil {
+	if err := Fill(t.Context(), cache.Store{}, p, dir, resource, "ref", cache.OwnerAgent, nil); err != nil {
 		t.Fatal(err)
 	}
 	if st, _ := (cache.Store{}).State(dir, resource); st != cache.Complete {
@@ -78,11 +79,20 @@ func TestFillExtractsAndClosesTheStream(t *testing.T) {
 	if !p.closed {
 		t.Error("the image stream was left open")
 	}
+	data, err := os.ReadFile(filepath.Join(dir, resource, ".image-cache-agent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"owner":"` + cache.OwnerAgent + `"`, `"source":"ref"`, `"config":"sha256:stubconfig"`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("sentinel %s lacks %s", data, want)
+		}
+	}
 }
 
 func TestFillReturnsWhatThePullFailedOn(t *testing.T) {
 	failure := errors.New("registry unreachable")
-	err := Fill(t.Context(), cache.Store{}, &stubPuller{pullErr: failure}, t.TempDir(), resource, "ref", nil)
+	err := Fill(t.Context(), cache.Store{}, &stubPuller{pullErr: failure}, t.TempDir(), resource, "ref", cache.OwnerAgent, nil)
 	if !errors.Is(err, failure) {
 		t.Errorf("err = %v, want the pull's error", err)
 	}
@@ -104,7 +114,7 @@ func TestFillReportsAFailedCloseOnlyAfterASuccess(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var heard []error
 			p := &stubPuller{entries: tc.entries, closeErr: closeErr}
-			_ = Fill(t.Context(), cache.Store{}, p, t.TempDir(), resource, "ref", func(err error) { heard = append(heard, err) })
+			_ = Fill(t.Context(), cache.Store{}, p, t.TempDir(), resource, "ref", cache.OwnerAgent, func(err error) { heard = append(heard, err) })
 			if !p.closed {
 				t.Error("the image stream was left open")
 			}

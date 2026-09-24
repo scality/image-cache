@@ -41,7 +41,8 @@ func CheckCachePath(cachePath string) error {
 }
 
 // Fill pulls source with p and extracts it into the directory of the named
-// resource under cachePath.
+// resource under cachePath, recording owner as its writer along with what the
+// source resolved to.
 //
 // onClose hears about a failure to close the image stream, and only once the
 // extraction went through: before that, the error Fill returns already says
@@ -49,7 +50,7 @@ func CheckCachePath(cachePath string) error {
 // the fill had succeeded. It may be nil.
 func Fill(
 	ctx context.Context, store cache.Store, p puller.Puller,
-	cachePath, name, source string, onClose func(error),
+	cachePath, name, source, owner string, onClose func(error),
 ) error {
 	content, img, err := p.Pull(ctx, source)
 	if err != nil {
@@ -61,7 +62,8 @@ func Fill(
 			onClose(cerr)
 		}
 	}()
-	if err := store.Extract(ctx, cachePath, name, img.Digest, content); err != nil {
+	rec := cache.Record{Owner: owner, Source: source, Digest: img.Digest, Config: img.Config}
+	if err := store.Extract(ctx, cachePath, name, rec, content); err != nil {
 		return err
 	}
 	extracted = true

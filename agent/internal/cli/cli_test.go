@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -590,5 +591,58 @@ func TestImportFailsWhenALayerCannotBeFetched(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(cacheDir); err != nil || len(entries) != 0 {
 		t.Errorf("the failed import left %v behind (%v)", entries, err)
+	}
+}
+
+type recorded struct {
+	Owner  string `json:"owner"`
+	Source string `json:"source"`
+	Config string `json:"config"`
+}
+
+func readSentinel(t *testing.T, cacheDir string) recorded {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(cacheDir, resourceName, sentinelName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r recorded
+	if err := json.Unmarshal(data, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// What the command writes says it wrote it, where it read from, and which
+// image it holds. Read from the archive or from the registry, the same image
+// has to record the same configuration digest: that is what the agent will
+// compare against the image its resource names, and a cache seeded from the
+// ISO has to match an ImageCache that points at the registry.
+func TestImportRecordsTheSameImageWhateverTheSource(t *testing.T) {
+	files := map[string][]byte{etcdTarPath: []byte("etcd")}
+	archivePath := archive(t, files)
+	registryRef := served(t, files)
+
+	sources := []string{archivePath, registryRef}
+	configs := make([]string, 0, len(sources))
+	for _, src := range sources {
+		cacheDir := t.TempDir()
+		if code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, src); code != 0 {
+			t.Fatalf("%s: exit = %d (%s)", src, code, errOut)
+		}
+		r := readSentinel(t, cacheDir)
+		if r.Owner != cache.OwnerCommand {
+			t.Errorf("%s: owner = %q, want %q", src, r.Owner, cache.OwnerCommand)
+		}
+		if r.Source != src {
+			t.Errorf("source = %q, want %q", r.Source, src)
+		}
+		if !strings.HasPrefix(r.Config, "sha256:") {
+			t.Errorf("%s: config = %q, want a digest", src, r.Config)
+		}
+		configs = append(configs, r.Config)
+	}
+	if configs[0] != configs[1] {
+		t.Errorf("the archive recorded %s and the registry %s for the same image", configs[0], configs[1])
 	}
 }

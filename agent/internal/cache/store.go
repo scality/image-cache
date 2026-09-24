@@ -48,9 +48,38 @@ const (
 	Complete
 )
 
+// Owners a sentinel names. Garbage collection only removes what the agent
+// wrote, so a directory another writer seeded stays until the agent claims
+// it.
+const (
+	OwnerAgent   = "image-cache-agent"
+	OwnerCommand = "imagecachectl"
+)
+
+// Record is what the sentinel remembers about a directory's content, beyond
+// the files it lists.
+type Record struct {
+	// Owner is who wrote the directory. Empty means the agent: every
+	// sentinel written before owners were recorded is the agent's.
+	Owner string
+	// Source is the reference or the archive path the content was read from,
+	// kept for whoever looks at the directory. Two sources naming the same
+	// image can differ, so it is not what an image is compared by.
+	Source string
+	// Digest is the manifest digest the source served.
+	Digest string
+	// Config is the digest of the image's configuration, the same however
+	// the image was reached: what tells whether a directory holds the image
+	// a resource asks for.
+	Config string
+}
+
 type sentinel struct {
 	Digest string   `json:"digest"`
 	Files  []string `json:"files"`
+	Owner  string   `json:"owner,omitempty"`
+	Source string   `json:"source,omitempty"`
+	Config string   `json:"config,omitempty"`
 }
 
 // Store reads and writes per-resource cache directories. Resource names are
@@ -103,7 +132,7 @@ func (s Store) State(cachePath, name string) (State, error) {
 // agent being drained stops between entries instead of writing out the rest of
 // the payload first.
 func (s Store) Extract(
-	ctx context.Context, cachePath, name, digest string, content io.Reader,
+	ctx context.Context, cachePath, name string, rec Record, content io.Reader,
 ) (err error) {
 	tmp, err := os.MkdirTemp(cachePath, "."+name+".tmp-")
 	if err != nil {
@@ -207,7 +236,9 @@ func (s Store) Extract(
 			errors.WithDetail("the image carries no file to cache"))
 	}
 
-	data, err := json.Marshal(sentinel{Digest: digest, Files: files})
+	data, err := json.Marshal(sentinel{
+		Digest: rec.Digest, Files: files, Owner: rec.Owner, Source: rec.Source, Config: rec.Config,
+	})
 	if err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("encoding the sentinel"))

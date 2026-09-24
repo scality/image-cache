@@ -25,9 +25,10 @@ call each other:
 - **`.github/workflows/`** — thin callers of the reusable workflows in
   `scality/workflows`.
 
-The two halves meet on **one contract: the cache directory layout** (per-resource
-subdirectory, archive names, completion sentinel). The agent writes, the package
-imports.
+They meet on **one contract: the cache directory layout** (per-resource
+subdirectory, archive names, completion sentinel). The agent and `imagecachectl`
+write it, through the same `internal/cache` package, and the preload package
+imports what they wrote.
 
 This code is generic and open-source: it knows about Kubernetes and containerd,
 never about a specific downstream distribution or product. Its docs are read by

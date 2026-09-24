@@ -4,11 +4,11 @@ A systemd service and timer that import container image tarballs from a local
 directory into containerd, on boot and every ten minutes. No Kubernetes client,
 no registry, no network: it works on a node whose cluster is down.
 
-It is one half of [image-cache](../README.md). The other half, the
-[image-cache-agent](../agent/README.md), fills that directory from a cluster.
-They share the directory and nothing else, so this package is useful on its own
-wherever the tarballs come from. See [../DESIGN.md](../DESIGN.md) for the split
-between the two.
+It is the part of [image-cache](../README.md) that reads the cache. The
+[image-cache-agent](../agent/README.md) fills that directory from a cluster, and
+`imagecachectl` fills it once on a node being installed. They share the
+directory and nothing else, so this package is useful on its own wherever the
+tarballs come from. See [../DESIGN.md](../DESIGN.md) for how the parts split.
 
 All the commands below run from this directory.
 

@@ -24,8 +24,8 @@ The project is three pieces that meet on a directory:
 | [`imagecachectl`](agent/cmd/imagecachectl/) (command, RPM) | The same fill, once, for a node that has no Kubernetes yet. Reads a registry or a docker archive and writes the tarballs where the agent would have. |
 
 The contract between them is the filesystem, `/var/lib/image-cache` by
-default: the agent writes tarballs, the preload service imports them. Either
-half works without the other. A node provisioned with tarballs copied at
+default: the agent or the command writes tarballs, the preload service imports
+them. Each works without the others. A node provisioned with tarballs copied at
 install time gets them imported with no agent running, and the agent keeps a
 cache up to date on a cluster that imports it some other way.
 

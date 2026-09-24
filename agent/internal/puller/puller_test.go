@@ -69,8 +69,8 @@ func TestRemotePullStreamsTheImageFiles(t *testing.T) {
 		}
 	}()
 	wantDigest, _ := img.Digest()
-	if digest != wantDigest.String() {
-		t.Errorf("digest = %s, want %s", digest, wantDigest)
+	if digest.Digest != wantDigest.String() {
+		t.Errorf("digest = %s, want %s", digest.Digest, wantDigest)
 	}
 	got := map[string]string{}
 	tr := tar.NewReader(rc)
@@ -147,8 +147,8 @@ func TestRemotePullResolvesMultiArchIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if digest != wantDigest.String() {
-		t.Errorf("digest = %s, want %s (amd64 child, not index)", digest, wantDigest)
+	if digest.Digest != wantDigest.String() {
+		t.Errorf("digest = %s, want %s (amd64 child, not index)", digest.Digest, wantDigest)
 	}
 
 	got := map[string]string{}
@@ -282,8 +282,8 @@ func TestTarballPullStreamsTheImageFiles(t *testing.T) {
 	}()
 
 	wantDigest, _ := img.Digest()
-	if digest != wantDigest.String() {
-		t.Errorf("digest = %s, want %s", digest, wantDigest)
+	if digest.Digest != wantDigest.String() {
+		t.Errorf("digest = %s, want %s", digest.Digest, wantDigest)
 	}
 	got := map[string]string{}
 	tr := tar.NewReader(rc)
@@ -902,5 +902,67 @@ func TestEntriesEndsWhenTheConsumerCloses(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the producer is still running five seconds after the consumer closed the stream")
+	}
+}
+
+// The configuration digest is what the image is, whatever serves it. Read
+// through a registry and through a docker archive of the same image, the two
+// pullers have to agree on it, or a cache seeded from the ISO would never be
+// recognised as holding the image a resource names in the registry.
+func TestBothPullersAgreeOnTheConfigDigest(t *testing.T) {
+	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := img.ConfigName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := httptest.NewServer(registry.New())
+	t.Cleanup(reg.Close)
+	ref := strings.TrimPrefix(reg.URL, "http://") + workerRefPath
+	if err := crane.Push(img, ref); err != nil {
+		t.Fatal(err)
+	}
+	path := saveArchive(t, img, "boot-cache/worker:1.0.0")
+
+	for via, resolve := range map[string]func() (Image, error){
+		"registry": func() (Image, error) { return Remote{}.Resolve(t.Context(), ref) },
+		"archive":  func() (Image, error) { return Tarball{}.Resolve(t.Context(), path) },
+	} {
+		id, err := resolve()
+		if err != nil {
+			t.Fatalf("%s: %v", via, err)
+		}
+		if id.Config != want.String() {
+			t.Errorf("%s: config = %s, want %s", via, id.Config, want)
+		}
+		if id.Digest == "" {
+			t.Errorf("%s: no manifest digest", via)
+		}
+	}
+}
+
+// Resolve answers from the manifest alone. The registry here refuses every
+// layer blob, and resolving has to succeed anyway: an agent checking whether
+// a seeded directory holds the right image must not download the image to
+// find out.
+func TestRemoteResolveReadsNoLayer(t *testing.T) {
+	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	layer := firstLayer(t, img).digest.String()
+	ref := servedTampered(t, img, layer, func([]byte) []byte {
+		panic("a layer was fetched")
+	})
+
+	id, err := Remote{}.Resolve(t.Context(), ref)
+	if err != nil {
+		t.Fatalf("resolving touched a layer: %v", err)
+	}
+	want, _ := img.ConfigName()
+	if id.Config != want.String() {
+		t.Errorf("config = %s, want %s", id.Config, want)
 	}
 }

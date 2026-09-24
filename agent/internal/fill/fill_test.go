@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/scality/image-cache/agent/internal/cache"
+	"github.com/scality/image-cache/agent/internal/puller"
 )
 
 const resource = "worker-1-0-0"
@@ -24,9 +25,9 @@ type stubPuller struct {
 	closed   bool
 }
 
-func (s *stubPuller) Pull(context.Context, string) (io.ReadCloser, string, error) {
+func (s *stubPuller) Pull(context.Context, string) (io.ReadCloser, puller.Image, error) {
 	if s.pullErr != nil {
-		return nil, "", s.pullErr
+		return nil, puller.Image{}, s.pullErr
 	}
 	buf := &bytes.Buffer{}
 	tw := tar.NewWriter(buf)
@@ -35,7 +36,11 @@ func (s *stubPuller) Pull(context.Context, string) (io.ReadCloser, string, error
 		_, _ = tw.Write([]byte(body))
 	}
 	_ = tw.Close()
-	return closer{buf, s}, "sha256:stub", nil
+	return closer{buf, s}, puller.Image{Digest: "sha256:stub", Config: "sha256:stubconfig"}, nil
+}
+
+func (s *stubPuller) Resolve(context.Context, string) (puller.Image, error) {
+	return puller.Image{Digest: "sha256:stub", Config: "sha256:stubconfig"}, s.pullErr
 }
 
 type closer struct {

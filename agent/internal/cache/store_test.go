@@ -590,3 +590,42 @@ func TestAnOldSentinelStillReadsComplete(t *testing.T) {
 		t.Errorf("state = %v, %v; want Complete", st, err)
 	}
 }
+
+// Garbage collection only removes what the agent wrote. A directory the
+// command seeded, before any resource claims it, has to survive: at install
+// the agent can land before the resources, and collecting the seeded cache
+// would pull the same gigabyte again. What the agent wrote, now or before
+// owners were recorded, is still collected, and so is a sentinel that does
+// not parse, as it always was.
+func TestGCLeavesADirectoryAnotherWriterOwns(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sentinel string
+		kept     bool
+	}{
+		{"seeded by the command", `{"digest":"d","files":[],"owner":"` + OwnerCommand + `"}`, true},
+		{"written by the agent", `{"digest":"d","files":[],"owner":"` + OwnerAgent + `"}`, false},
+		{"written before owners existed", `{"digest":"d","files":[]}`, false},
+		{"a sentinel that does not parse", `{not json`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, s := t.TempDir(), Store{}
+			res := filepath.Join(dir, "worker-134-0-0")
+			if err := os.MkdirAll(res, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(res, sentinelName), []byte(tc.sentinel), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			removed, err := s.GC(dir, map[string]bool{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, statErr := os.Stat(res)
+			if kept := statErr == nil; kept != tc.kept {
+				t.Errorf("kept = %v, want %v (removed %v)", kept, tc.kept, removed)
+			}
+		})
+	}
+}

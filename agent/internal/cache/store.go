@@ -333,9 +333,30 @@ func (s Store) SweepTemporaries(cachePath, name string) ([]string, error) {
 	return removed, utilerrors.NewAggregate(errs)
 }
 
+// agentOwned reports whether dir bears a sentinel the agent wrote. No
+// sentinel means foreign content. An owner left empty means the agent, since
+// every sentinel written before owners were recorded is the agent's; reading
+// it the other way would leave every existing cluster with directories
+// nothing collects. A sentinel that does not parse is the agent's too, as it
+// has always been treated.
+func (Store) agentOwned(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, sentinelName))
+	if err != nil {
+		return false
+	}
+	var sn sentinel
+	if json.Unmarshal(data, &sn) != nil {
+		return true
+	}
+	return sn.Owner == "" || sn.Owner == OwnerAgent
+}
+
 // GC removes agent-owned directories (sentinel-bearing, plus stale hidden
 // temporaries) under cachePath whose name is not in keep. Flat files and
-// foreign directories survive. Returns the removed names.
+// foreign directories survive, and so does a directory whose sentinel names
+// another owner: a node seeded before the agent arrived keeps its cache until
+// a resource claims it, whatever order the agent and the resources land in.
+// Returns the removed names.
 func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
 	entries, err := os.ReadDir(cachePath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -352,10 +373,8 @@ func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
 			continue
 		}
 		stale := strings.HasPrefix(e.Name(), ".") && strings.Contains(e.Name(), ".tmp-")
-		if !stale {
-			if _, err := os.Stat(filepath.Join(cachePath, e.Name(), sentinelName)); err != nil {
-				continue
-			}
+		if !stale && !s.agentOwned(filepath.Join(cachePath, e.Name())) {
+			continue
 		}
 		if err := os.RemoveAll(filepath.Join(cachePath, e.Name())); err != nil {
 			errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),

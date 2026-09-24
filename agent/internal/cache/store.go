@@ -119,6 +119,68 @@ func (s Store) State(cachePath, name string) (State, error) {
 	return Complete, nil
 }
 
+// ErrAdopt covers taking over a directory another writer seeded.
+var ErrAdopt = errors.New("adopting a seeded cache directory failed")
+
+// Foreign reports whether another writer than the agent wrote the directory.
+func (r Record) Foreign() bool { return r.Owner != "" && r.Owner != OwnerAgent }
+
+// Record returns what the sentinel of the named resource's directory
+// remembers. It is meant for a directory State reported Complete.
+func (s Store) Record(cachePath, name string) (Record, error) {
+	sn, err := s.readSentinel(cachePath, name)
+	if err != nil {
+		return Record{}, err
+	}
+	return Record{Owner: sn.Owner, Source: sn.Source, Digest: sn.Digest, Config: sn.Config}, nil
+}
+
+// Adopt makes the agent the owner of a directory another writer seeded,
+// leaving its content and the rest of the sentinel as they are. From then on
+// the directory is the agent's to refresh and to collect.
+//
+// The sentinel is rewritten through a temporary file renamed over it, so a
+// crash leaves either the old owner or the new one, never a sentinel half
+// written, which State would read as an incomplete resource to pull again.
+func (s Store) Adopt(cachePath, name string) error {
+	sn, err := s.readSentinel(cachePath, name)
+	if err != nil {
+		return errors.Wrap(ErrAdopt, errors.CausedBy(err), errors.WithProperty("resource", name))
+	}
+	sn.Owner = OwnerAgent
+	data, err := json.Marshal(sn)
+	if err != nil {
+		return errors.Wrap(ErrAdopt, errors.CausedBy(err), errors.WithProperty("resource", name))
+	}
+	path := filepath.Join(s.dir(cachePath, name), sentinelName)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return errors.Wrap(ErrAdopt, errors.CausedBy(err),
+			errors.WithDetail("writing the new sentinel"), errors.WithProperty("resource", name))
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return utilerrors.NewAggregate([]error{
+			errors.Wrap(ErrAdopt, errors.CausedBy(err),
+				errors.WithDetail("replacing the sentinel"), errors.WithProperty("resource", name)),
+			os.Remove(tmp),
+		})
+	}
+	return nil
+}
+
+func (s Store) readSentinel(cachePath, name string) (sentinel, error) {
+	data, err := os.ReadFile(filepath.Join(s.dir(cachePath, name), sentinelName))
+	if err != nil {
+		return sentinel{}, errors.Wrap(ErrState, errors.CausedBy(err), errors.WithProperty("resource", name))
+	}
+	var sn sentinel
+	if err := json.Unmarshal(data, &sn); err != nil {
+		return sentinel{}, errors.Wrap(ErrState, errors.CausedBy(err),
+			errors.WithDetail("the sentinel does not parse"), errors.WithProperty("resource", name))
+	}
+	return sn, nil
+}
+
 // Extract writes the regular files of the tar stream into the resource
 // directory, flattened to their base names, skipping directories and refusing
 // the whole stream on any other kind of entry, then the sentinel, then swaps

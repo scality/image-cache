@@ -629,3 +629,58 @@ func TestGCLeavesADirectoryAnotherWriterOwns(t *testing.T) {
 		})
 	}
 }
+
+// Adopting a seeded directory changes its owner and nothing else: the files,
+// what the sentinel lists, and where the content came from stay as the
+// command wrote them, and the directory still reads complete.
+func TestAdoptOnlyChangesTheOwner(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	seeded := Record{Owner: OwnerCommand, Source: "/mnt/iso/boot-cache.tar", Digest: "sha256:manifest", Config: "sha256:config"}
+	if err := s.Extract(t.Context(), dir, "c", seeded, tarStream(t, map[string]string{testTar: "1"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Adopt(dir, "c"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Record(dir, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := seeded
+	want.Owner = OwnerAgent
+	if got != want {
+		t.Errorf("record = %+v, want %+v", got, want)
+	}
+	if got.Foreign() {
+		t.Error("an adopted directory still reads as another writer's")
+	}
+	if st, err := s.State(dir, "c"); err != nil || st != Complete {
+		t.Errorf("state = %v, %v; want Complete", st, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "c", testTar)); err != nil || string(data) != "1" {
+		t.Errorf("content = %q, %v; want it untouched", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "c", sentinelName+".tmp")); !os.IsNotExist(err) {
+		t.Errorf("the temporary sentinel is left behind: %v", err)
+	}
+}
+
+// There is nothing to adopt, or to read, where no sentinel is.
+func TestAdoptAndRecordNeedASentinel(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	if err := s.Adopt(dir, "missing"); !errors.Is(err, ErrAdopt) {
+		t.Errorf("Adopt = %v, want ErrAdopt", err)
+	}
+	if _, err := s.Record(dir, "missing"); !errors.Is(err, ErrState) {
+		t.Errorf("Record = %v, want ErrState", err)
+	}
+}
+
+func TestForeign(t *testing.T) {
+	for owner, want := range map[string]bool{"": false, OwnerAgent: false, OwnerCommand: true} {
+		if got := (Record{Owner: owner}).Foreign(); got != want {
+			t.Errorf("Foreign() with owner %q = %v, want %v", owner, got, want)
+		}
+	}
+}

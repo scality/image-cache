@@ -110,11 +110,17 @@ complete and agent-owned:
 - **Ownership**: garbage collection only ever considers directories containing
   a sentinel, plus the agent's own interrupted extractions (hidden, and holding
   `.tmp-`, see below). Flat tarballs (e.g. placed by provisioning at bootstrap)
-  and foreign directories in a shared cache path are never touched.
+  and foreign directories in a shared cache path are never touched. The
+  sentinel records its writer, and a directory `imagecachectl` wrote is left
+  alone until a resource adopts it (see the one-shot command below). A
+  sentinel written before writers were recorded, or one that does not parse,
+  counts as the agent's.
 - **Completeness**: a directory without a sentinel is a partial extraction and
   is redone. The sentinel lists the expected file names, so a manually deleted
   tarball is detected and repaired.
-- **Traceability**: the sentinel records the resolved image digest.
+- **Traceability**: the sentinel records who wrote the directory, the source
+  it was read from, the manifest digest and the configuration digest of the
+  image.
 
 The name is the agent's own: an entry carrying it inside a cache image is
 skipped, so the sentinel always describes what the agent extracted. Entries
@@ -172,11 +178,14 @@ One pass:
 
 1. Compute `desired`: the ImageCache resources whose `nodeSelector` matches
    the labels of the node named by `NODE_NAME` (downward API).
-2. For each desired resource: if its directory is complete, done. Otherwise
-   set the label to `pending`, pull `spec.source` (linux/amd64), extract
-   atomically, then set the label to `synced`.
-3. Garbage-collect: in every scanned cache path, delete the sentinel-bearing
-   directories that no desired resource claims. The scan set is the default
+2. For each desired resource: if its directory is complete and the agent
+   wrote it, done. If `imagecachectl` wrote it, set the label to `pending` and
+   check that it holds the resource's image before adopting it (see the
+   one-shot command below). Otherwise set the label to `pending`, pull
+   `spec.source` (linux/amd64), extract atomically, then set the label to
+   `synced`.
+3. Garbage-collect: in every scanned cache path, delete the directories whose
+   sentinel names the agent and that no desired resource claims. The scan set is the default
    cache path plus every cache path an ImageCache references now or referenced
    earlier in this agent process's lifetime — a custom path stays in the set
    after its last resource is deleted, so its orphaned directory is still
@@ -244,14 +253,12 @@ Three consequences worth stating:
 
 - **The name is the caller's.** It becomes the resource directory, and the
   agent recognises a resource by it. Given the name the `ImageCache` will
-  carry, the agent finds the sentinel, reads it as complete, and pulls
-  nothing. Given any other name, garbage collection removes the directory,
-  since it bears the agent's sentinel and nothing claims it. That only holds
-  under a cache path the agent scans, which is the default one plus the paths
-  declared by resources: a directory imported under `--cache-path /srv/images`
-  is the caller's to clean up, because nothing points the agent at it. The
-  command validates the name as a DNS-1123 subdomain, the rule the API server
-  applies to the resource, so the two cannot disagree on what a name is.
+  carry, the agent finds the directory complete and adopts it once it has
+  checked the content (below). Given any other name, the directory stays:
+  garbage collection leaves what the command wrote, and no resource claims
+  it, so it is the caller's to remove. The command validates the name as a
+  DNS-1123 subdomain, the rule the API server applies to the resource, so the
+  two cannot disagree on what a name is.
 - **It replaces only what the store wrote.** The swap that publishes a
   resource removes whatever is at the destination first, so it refuses a
   directory that does not bear the sentinel. The cache path is shared, and a
@@ -263,6 +270,33 @@ Three consequences worth stating:
   registry, whatever the source now points at. Keeping a node up to date is
   the agent's job, and a command that ran again on every convergence would be
   a second, weaker one.
+
+### Adopting a seeded directory
+
+The sentinel names its writer, so the agent tells what the command seeded from
+what it wrote itself. Garbage collection leaves the command's directories
+alone: at install the agent can land before the resources that name them, and
+collecting a seeded cache would pull the same gigabyte again.
+
+A resource that claims a seeded directory keeps its node `pending` until the
+agent has checked the content. The agent resolves `spec.source`, which reads
+the manifest and the configuration and never a layer, and compares the
+configuration digest with the one the command recorded:
+
+- the same image: the agent rewrites the owner in the sentinel, through a
+  temporary file renamed over it, and labels the node `synced` without
+  pulling. From then on the directory is the agent's, to refresh and to
+  collect.
+- another image: the directory is replaced like any other that does not hold
+  what its resource asks for.
+- the source cannot be resolved: the directory is left as it is, and the next
+  pass tries again.
+
+The configuration digest identifies the content because it is the one digest a
+docker archive and a registry agree on. The manifest digest changes when an
+image is saved or pushed, and the source string differs on the very first
+node, seeded from an archive path and claimed through a registry reference,
+and again whenever the registry endpoint changes.
 
 ## Container image and deployment
 

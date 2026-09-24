@@ -117,5 +117,5 @@ Do not scaffold them back in:
   once with `filepath.Clean` at the entry point. Two spellings of the same
   directory made the garbage collector delete what the same pass extracted.
 - The cache is shared with whatever else writes into it. The agent only
-  deletes a directory carrying its own sentinel, or one of its interrupted
-  extractions. Keep it that way.
+  deletes a directory whose sentinel names it as the writer, or one of its
+  interrupted extractions. Keep it that way.

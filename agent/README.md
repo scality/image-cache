@@ -85,8 +85,9 @@ spec:
 - `nodeSelector` matches node labels exactly, like a pod's own selector. Empty
   selects every node.
 - `cachePath` defaults to `/var/lib/image-cache`. The agent extracts into
-  `<cachePath>/<name>/` and deletes only what it owns: a directory carrying its
-  sentinel, or one of its own interrupted extractions. It garbage-collects the
+  `<cachePath>/<name>/` and deletes only what it owns: a directory whose
+  sentinel names the agent, or one of its own interrupted extractions. A
+  directory `imagecachectl` seeded waits for the resource that adopts it. It garbage-collects the
   default path on every pass even when no resource points at it, and it forgets
   a non-default path when the process restarts, so a resource deleted during a
   restart leaves its directory behind.

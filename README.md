@@ -155,8 +155,9 @@ there is no agent yet to create it either.
 `--name` is the name of the `ImageCache` resource this content belongs to. It
 is the directory the tarballs land in, and it is how the agent recognises the
 resource later: give it the name the resource will carry and the agent adopts
-what the command wrote, instead of pulling the same image again and collecting
-the directory it did not recognise.
+what the command wrote instead of pulling the same image again. Until a
+resource claims it, the agent leaves the directory alone, so it does not
+matter whether the agent or the resources reach the node first.
 
 The source is read as a path when it starts with a separator or a dot, or ends
 in `.tar`, and as an image reference otherwise. What decides is the shape of
@@ -173,10 +174,15 @@ without the agent's sentinel in it. The cache path is shared and the command
 runs as root, so a name that lands on a neighbouring directory stops rather
 than emptying it. Removing that directory by hand is how you say you meant it.
 
-One thing to get right the first time: nothing checks that what you imported
-under a name is what the resource of that name will ask for. Seed the wrong
-image and the agent adopts it, labels the node synced and never pulls the
-right one. Removing the directory by hand is the way back.
+Before adopting a directory, the agent checks that it holds the image the
+resource asks for. It reads the manifest and the configuration of the
+resource's source, never a layer, and compares the configuration digest with
+the one the command recorded, which is the same whether the image was read
+from an archive or from a registry. When they match, the agent takes the
+directory over and pulls nothing. When they differ, it replaces the content.
+When the source cannot be resolved, it leaves the directory as it is, keeps
+the resource pending and tries again on the next pass. A directory imported
+under a name no resource ever carries stays until you remove it.
 
 ### Building a cache image
 

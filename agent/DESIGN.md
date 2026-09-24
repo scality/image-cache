@@ -222,6 +222,11 @@ Pulling and extraction use
   is exactly what a static, spec-compliant registry expects from its clients.
 - Its in-memory registry (`pkg/registry`) lets tests exercise the real pull
   path without infrastructure.
+- TLS goes through its default transport, which trusts the system CAs.
+  `--ca-file` adds a PEM bundle to that pool instead of replacing it, so a
+  registry behind a public certificate stays reachable next to one signed by
+  a private CA. The bundle is loaded once, when the puller is built, and an
+  unusable one stops the agent at startup rather than failing every pull.
 
 The cache images are regular container images (they must remain importable
 and mountable with `ctr` by provisioning tooling), so an artifact-oriented

@@ -104,8 +104,8 @@ Per-resource subdirectories make name collisions between versions impossible
 and make garbage collection atomic: removing a resource's cache is removing
 one directory.
 
-The sentinel file is written after everything else and marks the directory as
-complete and agent-owned:
+The sentinel file is written after everything else. It marks the directory as
+complete and records who wrote it:
 
 - **Ownership**: garbage collection only ever considers directories containing
   a sentinel, plus the agent's own interrupted extractions (hidden, and holding

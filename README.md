@@ -170,9 +170,9 @@ rather than only at install. `--cache-path` overrides the directory; it has to
 be absolute, the same rule the `ImageCache` field follows.
 
 The import refuses to replace a directory it did not write, that is one
-without the agent's sentinel in it. The cache path is shared and the command
-runs as root, so a name that lands on a neighbouring directory stops rather
-than emptying it. Removing that directory by hand is how you say you meant it.
+without the sentinel the agent and the command write. The cache path is shared
+and the command runs as root, so a name that lands on a neighbouring directory
+stops rather than emptying it. Removing that directory by hand is how you say you meant it.
 
 Before adopting a directory, the agent checks that it holds the image the
 resource asks for. It reads the manifest and the configuration of the

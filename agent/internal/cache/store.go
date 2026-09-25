@@ -154,9 +154,8 @@ func (s Store) Extract(
 			// that image with no registry to fall back on. docker build copies
 			// a symbolic link as it finds it, dangling if it pointed outside the
 			// build context, so the image is refused whole instead. A hard link
-			// could be recreated from its target, but the Salt module this
-			// replaces refused it too, and a boot cache image has no use for
-			// one.
+			// could be recreated from its target, but a boot cache image has
+			// no use for one.
 			return errors.Wrap(ErrExtract,
 				errors.WithDetailf("%q is %s, not a regular file", hdr.Name, entryKind(hdr.Typeflag)))
 		}

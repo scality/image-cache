@@ -124,9 +124,8 @@ other kind of entry refuses the image whole. A symbolic link or a device is
 not written out, and skipping it would publish a resource short of an archive
 while the sentinel calls it complete. `docker build` copies a symbolic link as
 it finds it, dangling if it pointed outside the build context, which is how
-that would happen. A hard link could be recreated from its target, but the
-Salt module this replaces refused it as well, and a boot cache image has no
-use for one.
+that would happen. A hard link could be recreated from its target, but a boot
+cache image has no use for one.
 
 Extraction is atomic for a first extraction: layers are extracted to a
 temporary directory next to the target, the sentinel is written, then the

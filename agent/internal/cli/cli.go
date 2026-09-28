@@ -204,11 +204,12 @@ func do(ctx context.Context, cachePath, name, source string, out, errOut io.Writ
 	// every interrupted attempt would otherwise stay on the disk for good.
 	// Only this resource's own leftovers, since a run for another name may be
 	// in flight.
-	if swept, serr := store.SweepTemporaries(cachePath, name); serr != nil {
-		return serr
-	} else if len(swept) > 0 {
-		printf(errOut, "imagecachectl: cleared %d leftover directory from an interrupted run\n",
-			len(swept))
+	swept, err := store.SweepTemporaries(cachePath, name)
+	if err != nil {
+		return err
+	}
+	if len(swept) > 0 {
+		printf(out, "cleared %d leftover directory from an interrupted run\n", len(swept))
 	}
 
 	content, digest, err := pullerFor(source).Pull(ctx, source)

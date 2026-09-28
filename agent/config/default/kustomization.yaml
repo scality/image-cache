@@ -49,7 +49,8 @@ patches:
 #    kind: DaemonSet
 
 # [REGISTRY-CA] To pull from a registry signed by a private CA, create a
-# registry-ca ConfigMap holding it under ca.crt, then uncomment the following line.
+# ConfigMap named registry-ca in the agent's namespace, with the CA under the
+# ca.crt key, then uncomment the three lines below.
 #- path: manager_registry_ca_patch.yaml
 #  target:
 #    kind: DaemonSet

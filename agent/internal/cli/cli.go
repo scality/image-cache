@@ -53,7 +53,7 @@ const importExample = `  imagecachectl import --name worker-1-0-0 registry.examp
 func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	var name, cachePath, caFile string
 	importCmd := &cobra.Command{
-		Use:     "import --name <resource> [--cache-path <dir>] <source>",
+		Use:     "import --name <resource> [--cache-path <dir>] [--ca-file <file>] <source>",
 		Short:   "Fill the image cache from a registry or a docker archive",
 		Long:    importLong,
 		Example: importExample,

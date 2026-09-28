@@ -103,6 +103,9 @@ func TestImportFromARegistry(t *testing.T) {
 	if string(got) != "pause" {
 		t.Errorf("pause.tar = %q, want %q", got, "pause")
 	}
+	if _, err := os.Stat(filepath.Join(cacheDir, resourceName, sentinelName)); err != nil {
+		t.Errorf("no sentinel written: %v", err)
+	}
 }
 
 // Once a resource is complete the command is a no-op, whatever the source
@@ -476,12 +479,15 @@ func TestImportSweepsItsOwnLeftovers(t *testing.T) {
 	}
 	src := archive(t, map[string][]byte{etcdTarPath: []byte("etcd")})
 
-	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, src)
+	code, out, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, src)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
 	}
 	if _, err := os.Stat(leftover); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the leftover survived the import: %v", err)
+	}
+	if !strings.Contains(out, "cleared 1 leftover directory") {
+		t.Errorf("stdout = %q, want it to report the leftover it cleared", out)
 	}
 }
 

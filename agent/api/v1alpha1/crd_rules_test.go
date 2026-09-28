@@ -25,11 +25,9 @@ import (
 
 const crdPath = "../../config/crd/bases/image-cache.scality.com_imagecaches.yaml"
 
-// The constants above and the kubebuilder markers next to them say the same
-// thing twice, because a marker is a comment and cannot read a constant. This
-// is what notices when the two stop agreeing, which is otherwise only found
-// on a node: the command would reject a name the API server accepts, or write
-// a directory under a name no resource can ever carry.
+// See the constants in imagecache_types.go for why this test exists. A drift
+// would otherwise only show on a node: the command would reject a name the
+// API server accepts, or write a directory under a name no resource can carry.
 func TestGeneratedCRDMatchesTheExportedLimits(t *testing.T) {
 	crd, err := os.ReadFile(crdPath)
 	if err != nil {

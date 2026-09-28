@@ -289,6 +289,66 @@ func TestExtractStopsOnCancelledContext(t *testing.T) {
 	}
 }
 
+// cancelAfter cancels a context once n bytes have been read through it, and
+// counts what was read in total.
+type cancelAfter struct {
+	r      io.Reader
+	n      int64
+	read   int64
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfter) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.read += int64(n)
+	if c.read >= c.n {
+		c.cancel()
+	}
+	return n, err
+}
+
+// Cancellation stops the copy of an entry, not only the loop between entries.
+func TestExtractStopsInTheMiddleOfAnEntry(t *testing.T) {
+	const size = 64 << 20
+	pr, pw := io.Pipe()
+	go func() {
+		tw := tar.NewWriter(pw)
+		if err := tw.WriteHeader(&tar.Header{Name: testTar, Mode: 0o644, Size: size}); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		if _, err := io.CopyN(tw, zeros{}, size); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		pw.CloseWithError(tw.Close())
+	}()
+	t.Cleanup(func() { _ = pr.Close() })
+
+	dir, s := t.TempDir(), Store{}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	src := &cancelAfter{r: pr, n: 1 << 20, cancel: cancel}
+
+	err := s.Extract(ctx, dir, "c", Record{Digest: testDigest}, src)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if src.read >= size {
+		t.Errorf("read %d bytes, the whole entry: cancellation waited for its end", src.read)
+	}
+	if st, _ := s.State(dir, "c"); st != Absent {
+		t.Errorf("state = %v, want Absent", st)
+	}
+}
+
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
 func TestState(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
 	if st, _ := s.State(dir, "none"); st != Absent {

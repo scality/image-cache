@@ -102,6 +102,9 @@ func TestImportFromARegistry(t *testing.T) {
 	if string(got) != "pause" {
 		t.Errorf("pause.tar = %q, want %q", got, "pause")
 	}
+	if _, err := os.Stat(filepath.Join(cacheDir, resourceName, sentinelName)); err != nil {
+		t.Errorf("no sentinel written: %v", err)
+	}
 }
 
 // Once a resource is complete the command is a no-op, whatever the source

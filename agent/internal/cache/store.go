@@ -99,9 +99,8 @@ func (s Store) State(cachePath, name string) (State, error) {
 // be called concurrently for the same name. A failed extraction leaves either
 // the previous state or a hidden temporary directory that GC removes later.
 //
-// A cache image is hundreds of megabytes, so the write loop honours ctx: an
-// agent being drained stops between entries instead of writing out the rest of
-// the payload first.
+// Every read honours ctx, inside an entry too: an entry can be hundreds of
+// megabytes, and nothing else watches ctx when the source is a local archive.
 func (s Store) Extract(
 	ctx context.Context, cachePath, name, digest string, content io.Reader,
 ) (err error) {
@@ -118,7 +117,7 @@ func (s Store) Extract(
 	}()
 
 	var files []string
-	tr := tar.NewReader(content)
+	tr := tar.NewReader(ctxReader{ctx: ctx, r: content})
 	for {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
@@ -333,4 +332,17 @@ func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
 		removed = append(removed, e.Name())
 	}
 	return removed, utilerrors.NewAggregate(errs)
+}
+
+// ctxReader fails every read once ctx is done.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }

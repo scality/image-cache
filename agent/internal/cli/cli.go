@@ -55,7 +55,7 @@ const helpFlag = "--help"
 // set cannot drift apart.
 const importCommand = "import"
 
-const usage = `Usage: imagecachectl import --name <resource> [--cache-path <dir>] <source>
+const usage = `Usage: imagecachectl import --name <resource> [--cache-path <dir>] [--ca-file <file>] <source>
 
 Fills the image cache with the archives a boot cache image carries.
 

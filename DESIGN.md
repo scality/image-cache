@@ -1,6 +1,6 @@
 # Design
 
-This document covers the project as a whole: the problem, the split into two
+This document covers the project as a whole: the problem, the split into three
 components, and the on-disk contract between them. The agent's own design
 (its custom resource, its reconciliation model, its failure handling) lives in
 [agent/DESIGN.md](agent/DESIGN.md).

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -601,9 +602,9 @@ func TestImportFailsWhenALayerCannotBeFetched(t *testing.T) {
 }
 
 type recorded struct {
-	Owner  string `json:"owner"`
-	Source string `json:"source"`
-	Config string `json:"config"`
+	Owner  string   `json:"owner"`
+	Source string   `json:"source"`
+	Layers []string `json:"layers"`
 }
 
 func readSentinel(t *testing.T, cacheDir string) recorded {
@@ -619,18 +620,15 @@ func readSentinel(t *testing.T, cacheDir string) recorded {
 	return r
 }
 
-// What the command writes says it wrote it, where it read from, and which
-// image it holds. Read from the archive or from the registry, the same image
-// has to record the same configuration digest: that is what the agent will
-// compare against the image its resource names, and a cache seeded from the
-// ISO has to match an ImageCache that points at the registry.
+// The sentinel names the command, the source and the layers. The archive and
+// the registry record the same layers for the same image.
 func TestImportRecordsTheSameImageWhateverTheSource(t *testing.T) {
 	files := map[string][]byte{etcdTarPath: []byte("etcd")}
 	archivePath := archive(t, files)
 	registryRef := served(t, files)
 
 	sources := []string{archivePath, registryRef}
-	configs := make([]string, 0, len(sources))
+	layers := make([][]string, 0, len(sources))
 	for _, src := range sources {
 		cacheDir := t.TempDir()
 		if code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, src); code != 0 {
@@ -643,12 +641,12 @@ func TestImportRecordsTheSameImageWhateverTheSource(t *testing.T) {
 		if r.Source != src {
 			t.Errorf("source = %q, want %q", r.Source, src)
 		}
-		if !strings.HasPrefix(r.Config, "sha256:") {
-			t.Errorf("%s: config = %q, want a digest", src, r.Config)
+		if len(r.Layers) != 1 || !strings.HasPrefix(r.Layers[0], "sha256:") {
+			t.Errorf("%s: layers = %q, want the image's one diff ID", src, r.Layers)
 		}
-		configs = append(configs, r.Config)
+		layers = append(layers, r.Layers)
 	}
-	if configs[0] != configs[1] {
-		t.Errorf("the archive recorded %s and the registry %s for the same image", configs[0], configs[1])
+	if !slices.Equal(layers[0], layers[1]) {
+		t.Errorf("the archive recorded %v and the registry %v for the same image", layers[0], layers[1])
 	}
 }

@@ -119,8 +119,8 @@ complete and records who wrote it:
   is redone. The sentinel lists the expected file names, so a manually deleted
   tarball is detected and repaired.
 - **Traceability**: the sentinel records who wrote the directory, the source
-  it was read from, the manifest digest and the configuration digest of the
-  image.
+  it was read from, the manifest digest and the diff IDs of the image's
+  layers.
 
 The name is the agent's own: an entry carrying it inside a cache image is
 skipped, so the sentinel always describes what the store extracted. Entries
@@ -281,8 +281,8 @@ collecting a seeded cache would pull the same gigabyte again.
 
 A resource that claims a seeded directory keeps its node `pending` until the
 agent has checked the content. The agent resolves `spec.source`, which reads
-the manifest and the configuration and never a layer, and compares the
-configuration digest with the one the command recorded:
+the manifest and the configuration and never a layer. It compares the diff
+IDs of the layers, in order, with the ones the command recorded:
 
 - the same image: the agent rewrites the owner in the sentinel, through a
   temporary file renamed over it, and labels the node `synced` without
@@ -293,11 +293,17 @@ configuration digest with the one the command recorded:
 - the source cannot be resolved: the directory is left as it is, and the next
   pass tries again.
 
-The configuration digest identifies the content because it is the one digest a
-docker archive and a registry agree on. The manifest digest changes when an
-image is saved or pushed, and the source string differs on the very first
-node, seeded from an archive path and claimed through a registry reference,
-and again whenever the registry endpoint changes.
+The diff IDs identify the content because the cache holds nothing else: the
+files come from the layers. They are the digests of the uncompressed layers,
+so they do not depend on how the image is stored. The other identities do:
+
+- the source string: the first node is seeded from an archive path and its
+  resource names a registry reference. The string also changes with the
+  registry endpoint.
+- the manifest digest: it changes when an image is saved or pushed.
+- the configuration digest: a format conversion, Docker to OCI for example,
+  writes the configuration out again in another key order. The content is
+  the same, the digest is not.
 
 ## Container image and deployment
 

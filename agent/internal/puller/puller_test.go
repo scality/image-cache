@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"io"
 	"maps"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -905,18 +907,87 @@ func TestEntriesEndsWhenTheConsumerCloses(t *testing.T) {
 	}
 }
 
-// The configuration digest is what the image is, whatever serves it. Read
-// through a registry and through a docker archive of the same image, the two
-// pullers have to agree on it, or a cache seeded from the ISO would never be
-// recognised as holding the image a resource names in the registry.
-func TestBothPullersAgreeOnTheConfigDigest(t *testing.T) {
+// reserialized is img with its configuration JSON in another key order, as a
+// Docker to OCI conversion leaves it. The configuration digest changes, the
+// layers do not.
+type reserialized struct {
+	v1.Image
+	raw []byte
+}
+
+func reserialize(t *testing.T, img v1.Image) *reserialized {
+	t.Helper()
+	raw, err := img.RawConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	// A map marshals with its keys sorted, the struct in declaration order.
+	sorted, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(sorted, raw) {
+		t.Fatal("the rewritten configuration is byte for byte the original")
+	}
+	return &reserialized{Image: img, raw: sorted}
+}
+
+func (r *reserialized) RawConfigFile() ([]byte, error) { return r.raw, nil }
+
+func (r *reserialized) ConfigName() (v1.Hash, error) {
+	h, _, err := v1.SHA256(bytes.NewReader(r.raw))
+	return h, err
+}
+
+func (r *reserialized) Manifest() (*v1.Manifest, error) {
+	m, err := r.Image.Manifest()
+	if err != nil {
+		return nil, err
+	}
+	m = m.DeepCopy()
+	if m.Config.Digest, err = r.ConfigName(); err != nil {
+		return nil, err
+	}
+	m.Config.Size = int64(len(r.raw))
+	return m, nil
+}
+
+func (r *reserialized) RawManifest() ([]byte, error) {
+	m, err := r.Manifest()
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(m)
+}
+
+func (r *reserialized) Digest() (v1.Hash, error) {
+	raw, err := r.RawManifest()
+	if err != nil {
+		return v1.Hash{}, err
+	}
+	h, _, err := v1.SHA256(bytes.NewReader(raw))
+	return h, err
+}
+
+// Both pullers report the same diff IDs for the same image, even when the
+// archive stores its configuration in another key order. See "Adopting a
+// seeded directory" in agent/DESIGN.md.
+func TestBothPullersAgreeOnTheLayers(t *testing.T) {
 	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := img.ConfigName()
+	cfg, err := img.ConfigFile()
 	if err != nil {
 		t.Fatal(err)
+	}
+	want := make([]string, 0, len(cfg.RootFS.DiffIDs))
+	for _, d := range cfg.RootFS.DiffIDs {
+		want = append(want, d.String())
 	}
 	reg := httptest.NewServer(registry.New())
 	t.Cleanup(reg.Close)
@@ -924,7 +995,11 @@ func TestBothPullersAgreeOnTheConfigDigest(t *testing.T) {
 	if err := crane.Push(img, ref); err != nil {
 		t.Fatal(err)
 	}
-	path := saveArchive(t, img, "boot-cache/worker:1.0.0")
+	converted := reserialize(t, img)
+	path := saveArchive(t, converted, "boot-cache/worker:1.0.0")
+	if a, b := mustConfigName(t, img), mustConfigName(t, converted); a == b {
+		t.Fatalf("both configurations hash to %s: the case under test is not set up", a)
+	}
 
 	for via, resolve := range map[string]func() (Image, error){
 		"registry": func() (Image, error) { return Remote{}.Resolve(t.Context(), ref) },
@@ -934,13 +1009,22 @@ func TestBothPullersAgreeOnTheConfigDigest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", via, err)
 		}
-		if id.Config != want.String() {
-			t.Errorf("%s: config = %s, want %s", via, id.Config, want)
+		if !slices.Equal(id.Layers, want) {
+			t.Errorf("%s: layers = %v, want %v", via, id.Layers, want)
 		}
 		if id.Digest == "" {
 			t.Errorf("%s: no manifest digest", via)
 		}
 	}
+}
+
+func mustConfigName(t *testing.T, img v1.Image) v1.Hash {
+	t.Helper()
+	h, err := img.ConfigName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
 }
 
 // Resolve answers from the manifest alone. The registry here refuses every
@@ -961,8 +1045,7 @@ func TestRemoteResolveReadsNoLayer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolving touched a layer: %v", err)
 	}
-	want, _ := img.ConfigName()
-	if id.Config != want.String() {
-		t.Errorf("config = %s, want %s", id.Config, want)
+	if len(id.Layers) != 1 {
+		t.Errorf("layers = %v, want the image's one layer", id.Layers)
 	}
 }

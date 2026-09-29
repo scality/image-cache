@@ -69,10 +69,8 @@ type Record struct {
 	Source string
 	// Digest is the manifest digest the source served.
 	Digest string
-	// Config is the digest of the image's configuration, the same however
-	// the image was reached: what tells whether a directory holds the image
-	// a resource asks for.
-	Config string
+	// Layers are the image's layer diff IDs, as puller.Image reports them.
+	Layers []string
 }
 
 type sentinel struct {
@@ -80,7 +78,7 @@ type sentinel struct {
 	Files  []string `json:"files"`
 	Owner  string   `json:"owner,omitempty"`
 	Source string   `json:"source,omitempty"`
-	Config string   `json:"config,omitempty"`
+	Layers []string `json:"layers,omitempty"`
 }
 
 // Store reads and writes per-resource cache directories. Resource names are
@@ -133,7 +131,7 @@ func (s Store) Record(cachePath, name string) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	return Record{Owner: sn.Owner, Source: sn.Source, Digest: sn.Digest, Config: sn.Config}, nil
+	return Record{Owner: sn.Owner, Source: sn.Source, Digest: sn.Digest, Layers: sn.Layers}, nil
 }
 
 // Adopt makes the agent the owner of a directory another writer seeded,
@@ -298,7 +296,7 @@ func (s Store) Extract(
 	}
 
 	data, err := json.Marshal(sentinel{
-		Digest: rec.Digest, Files: files, Owner: rec.Owner, Source: rec.Source, Config: rec.Config,
+		Digest: rec.Digest, Files: files, Owner: rec.Owner, Source: rec.Source, Layers: rec.Layers,
 	})
 	if err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),

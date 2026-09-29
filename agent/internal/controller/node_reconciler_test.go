@@ -96,7 +96,7 @@ func (f *fakePuller) Pull(_ context.Context, ref string) (io.ReadCloser, puller.
 }
 
 // fakeImage is what every source resolves to in these tests.
-var fakeImage = puller.Image{Digest: "sha256:fake", Config: "sha256:fakeconfig"}
+var fakeImage = puller.Image{Digest: "sha256:fake", Layers: []string{"sha256:fakelayer"}}
 
 // pullsOf reports how many times ref was pulled.
 func (f *fakePuller) pullsOf(ref string) int {
@@ -425,12 +425,12 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 	})
 
 	// A resource that claims a directory the command seeded takes it over when
-	// it holds the resource's image, which the configuration digest decides
+	// it holds the resource's image, which the layers' diff IDs decide
 	// whatever the command read it from, and costs no pull.
 	It("adopts a seeded directory that holds the resource's image, without pulling", func() {
 		const name = "adopted-134-0-0"
 		source := "registry.example.com/boot-cache-adopted:134.0.0"
-		dir := seedDirectory(name, fakeImage.Config)
+		dir := seedDirectory(name, fakeImage.Layers[0])
 
 		ic := matchingResource(name, source)
 		Expect(k8sClient.Create(ctx, ic)).To(Succeed())
@@ -452,7 +452,7 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 	It("replaces a seeded directory that holds another image", func() {
 		const name = "reseeded-134-0-0"
 		source := "registry.example.com/boot-cache-reseeded:134.0.0"
-		dir := seedDirectory(name, "sha256:anotherconfig")
+		dir := seedDirectory(name, "sha256:anotherlayer")
 
 		ic := matchingResource(name, source)
 		Expect(k8sClient.Create(ctx, ic)).To(Succeed())
@@ -472,7 +472,7 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 	It("leaves a seeded directory untouched while its source cannot be resolved", func() {
 		const name = "unresolved-134-0-0"
 		source := "registry.example.com/boot-cache-unresolved:134.0.0"
-		dir := seedDirectory(name, fakeImage.Config)
+		dir := seedDirectory(name, fakeImage.Layers[0])
 		testPuller.fail.Store(true)
 		DeferCleanup(func() { testPuller.fail.Store(false) })
 
@@ -687,14 +687,14 @@ const seededContent = "seeded"
 
 // seedDirectory writes, under the suite's cache directory, what the command
 // leaves for the named resource: a complete directory it owns, holding the
-// image whose configuration digest is configDigest.
-func seedDirectory(name, configDigest string) string {
+// image whose only layer has the diff ID layer.
+func seedDirectory(name, layer string) string {
 	GinkgoHelper()
 	dir := filepath.Join(cacheDir, name)
 	Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
 	Expect(os.WriteFile(filepath.Join(dir, etcdTarName), []byte(seededContent), 0o644)).To(Succeed())
 	sentinel := `{"digest":"sha256:seeded","files":["` + etcdTarName + `"],"owner":"` + cache.OwnerCommand +
-		`","source":"/mnt/iso/boot-cache.tar","config":"` + configDigest + `"}`
+		`","source":"/mnt/iso/boot-cache.tar","layers":["` + layer + `"]}`
 	Expect(os.WriteFile(filepath.Join(dir, ".image-cache-agent.json"), []byte(sentinel), 0o644)).To(Succeed())
 	return dir
 }

@@ -30,11 +30,10 @@ type Image struct {
 	// depends on how the image is stored, so the same image reached through
 	// a registry and through a docker archive carries two of them.
 	Digest string
-	// Config is the digest of the image's configuration: what the image is.
-	// It is the same through a registry and through a docker archive, and
-	// through any registry endpoint, which is what makes it the one to
-	// compare two sources by.
-	Config string
+	// Layers are the diff IDs of the image's layers, in order: the digests
+	// of the uncompressed layers. Two sources are compared by them, see
+	// "Adopting a seeded directory" in agent/DESIGN.md.
+	Layers []string
 }
 
 // Puller resolves an image reference and returns the entries of its layers.
@@ -45,7 +44,7 @@ type Puller interface {
 	// the stream.
 	Pull(ctx context.Context, ref string) (io.ReadCloser, Image, error)
 	// Resolve returns what the source resolves to without reading its
-	// layers: for a registry, the manifest and nothing else.
+	// layers: for a registry, the manifest and the configuration.
 	Resolve(ctx context.Context, ref string) (Image, error)
 }
 
@@ -69,8 +68,8 @@ func (r Remote) Resolve(ctx context.Context, ref string) (Image, error) {
 	return id, err
 }
 
-// open resolves ref to its linux/amd64 image. It reads the manifest, never a
-// layer: those are fetched as the stream is read.
+// open resolves ref to its linux/amd64 image. It reads the manifest and the
+// configuration, never a layer: those are fetched as the stream is read.
 func (Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 	parsed, err := name.ParseReference(ref)
 	if err != nil {
@@ -148,17 +147,21 @@ func (Tarball) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 	return img, id, err
 }
 
-// identify reads the two digests an image is known by.
+// identify reads the manifest digest and the layers' diff IDs.
 func identify(img v1.Image, ref string) (Image, error) {
 	digest, err := img.Digest()
 	if err != nil {
 		return Image{}, errors.Wrap(ErrPull, errors.CausedBy(err),
 			errors.WithDetail("resolving the digest"), errors.WithProperty("source", ref))
 	}
-	config, err := img.ConfigName()
+	cfg, err := img.ConfigFile()
 	if err != nil {
 		return Image{}, errors.Wrap(ErrPull, errors.CausedBy(err),
-			errors.WithDetail("resolving the configuration digest"), errors.WithProperty("source", ref))
+			errors.WithDetail("reading the image configuration"), errors.WithProperty("source", ref))
 	}
-	return Image{Digest: digest.String(), Config: config.String()}, nil
+	layers := make([]string, 0, len(cfg.RootFS.DiffIDs))
+	for _, d := range cfg.RootFS.DiffIDs {
+		layers = append(layers, d.String())
+	}
+	return Image{Digest: digest.String(), Layers: layers}, nil
 }

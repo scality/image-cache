@@ -37,11 +37,11 @@ func (s *stubPuller) Pull(context.Context, string) (io.ReadCloser, puller.Image,
 		_, _ = tw.Write([]byte(body))
 	}
 	_ = tw.Close()
-	return closer{buf, s}, puller.Image{Digest: "sha256:stub", Config: "sha256:stubconfig"}, nil
+	return closer{buf, s}, puller.Image{Digest: "sha256:stub", Layers: []string{"sha256:stublayer"}}, nil
 }
 
 func (s *stubPuller) Resolve(context.Context, string) (puller.Image, error) {
-	return puller.Image{Digest: "sha256:stub", Config: "sha256:stubconfig"}, s.pullErr
+	return puller.Image{Digest: "sha256:stub", Layers: []string{"sha256:stublayer"}}, s.pullErr
 }
 
 type closer struct {
@@ -83,7 +83,7 @@ func TestFillExtractsAndClosesTheStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"owner":"` + cache.OwnerAgent + `"`, `"source":"ref"`, `"config":"sha256:stubconfig"`} {
+	for _, want := range []string{`"owner":"` + cache.OwnerAgent + `"`, `"source":"ref"`, `"layers":["sha256:stublayer"]`} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("sentinel %s lacks %s", data, want)
 		}

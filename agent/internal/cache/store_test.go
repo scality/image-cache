@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -614,7 +615,7 @@ func TestExtractRefusesAStreamEndingInAWrappedEOF(t *testing.T) {
 // it holds, next to the files it lists.
 func TestExtractRecordsWhoWroteTheDirectoryAndFromWhat(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
-	rec := Record{Owner: OwnerCommand, Source: "/mnt/iso/boot-cache.tar", Digest: "sha256:manifest", Config: "sha256:config"}
+	rec := Record{Owner: OwnerCommand, Source: "/mnt/iso/boot-cache.tar", Digest: "sha256:manifest", Layers: []string{"sha256:layer"}}
 	if err := s.Extract(t.Context(), dir, "c", rec, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
@@ -626,8 +627,8 @@ func TestExtractRecordsWhoWroteTheDirectoryAndFromWhat(t *testing.T) {
 	if err := json.Unmarshal(data, &sn); err != nil {
 		t.Fatal(err)
 	}
-	got := Record{Owner: sn.Owner, Source: sn.Source, Digest: sn.Digest, Config: sn.Config}
-	if got != rec {
+	got := Record{Owner: sn.Owner, Source: sn.Source, Digest: sn.Digest, Layers: sn.Layers}
+	if !reflect.DeepEqual(got, rec) {
 		t.Errorf("sentinel = %+v, want %+v", got, rec)
 	}
 }
@@ -695,7 +696,7 @@ func TestGCLeavesADirectoryAnotherWriterOwns(t *testing.T) {
 // command wrote them, and the directory still reads complete.
 func TestAdoptOnlyChangesTheOwner(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
-	seeded := Record{Owner: OwnerCommand, Source: "/mnt/iso/boot-cache.tar", Digest: "sha256:manifest", Config: "sha256:config"}
+	seeded := Record{Owner: OwnerCommand, Source: "/mnt/iso/boot-cache.tar", Digest: "sha256:manifest", Layers: []string{"sha256:layer"}}
 	if err := s.Extract(t.Context(), dir, "c", seeded, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
@@ -709,7 +710,7 @@ func TestAdoptOnlyChangesTheOwner(t *testing.T) {
 	}
 	want := seeded
 	want.Owner = OwnerAgent
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("record = %+v, want %+v", got, want)
 	}
 	if got.Foreign() {

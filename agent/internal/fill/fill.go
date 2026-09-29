@@ -62,7 +62,7 @@ func Fill(
 			onClose(cerr)
 		}
 	}()
-	rec := cache.Record{Owner: owner, Source: source, Digest: img.Digest, Config: img.Config}
+	rec := cache.Record{Owner: owner, Source: source, Digest: img.Digest, Layers: img.Layers}
 	if err := store.Extract(ctx, cachePath, name, rec, content); err != nil {
 		return err
 	}

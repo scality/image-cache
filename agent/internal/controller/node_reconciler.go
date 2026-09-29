@@ -180,13 +180,11 @@ func cachePathOf(ic *imagecachev1alpha1.ImageCache) string {
 	return filepath.Clean(ic.Spec.CachePath)
 }
 
-// adopt takes over a directory another writer seeded, when it holds the image
-// the resource names, and reports whether it did. The check compares
-// configuration digests, the one identity that survives a docker archive and
-// a change of registry endpoint, and it costs the image's manifest, never a
-// layer. A different image is not an error: the caller then replaces the
-// content. A source that cannot be resolved is one, and the directory is
-// left as it is until the next pass.
+// adopt takes over a directory another writer seeded when it holds the image
+// the resource names, and reports whether it did. It compares the layers'
+// diff IDs, see "Adopting a seeded directory" in agent/DESIGN.md. A different
+// image is not an error: the caller replaces the content. A source that
+// cannot be resolved is an error, and the directory is left as it is.
 func (r *NodeReconciler) adopt(ctx context.Context, ic *imagecachev1alpha1.ImageCache, rec cache.Record) (bool, error) {
 	log := logf.FromContext(ctx).WithValues("resource", ic.Name, "seededFrom", rec.Source)
 	id, err := r.Puller.Resolve(ctx, ic.Spec.Source)
@@ -194,9 +192,9 @@ func (r *NodeReconciler) adopt(ctx context.Context, ic *imagecachev1alpha1.Image
 		return false, errors.Wrap(ErrSync, errors.CausedBy(err),
 			errors.WithDetail("resolving the image a seeded directory is checked against"))
 	}
-	if rec.Config == "" || rec.Config != id.Config {
+	if len(rec.Layers) == 0 || !slices.Equal(rec.Layers, id.Layers) {
 		log.Info("Seeded cache directory holds another image, replacing it",
-			"recorded", rec.Config, "wanted", id.Config)
+			"recorded", rec.Layers, "wanted", id.Layers)
 		return false, nil
 	}
 	if err := r.Store.Adopt(cachePathOf(ic), ic.Name); err != nil {

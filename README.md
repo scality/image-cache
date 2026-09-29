@@ -169,20 +169,17 @@ reaches no registry, so the command is safe to call on every convergence
 rather than only at install. `--cache-path` overrides the directory; it has to
 be absolute, the same rule the `ImageCache` field follows.
 
-The import refuses to replace a directory it did not write, that is one
-without the sentinel the agent and the command write. The cache path is shared
-and the command runs as root, so a name that lands on a neighbouring directory
-stops rather than emptying it. Removing that directory by hand is how you say you meant it.
+The import refuses to replace a directory without a sentinel. The cache path
+is shared and the command runs as root, so a name that lands on a neighbouring
+directory stops rather than emptying it. Remove that directory by hand if you
+meant it.
 
-Before adopting a directory, the agent checks that it holds the image the
-resource asks for. It reads the manifest and the configuration of the
-resource's source, never a layer, and compares the configuration digest with
-the one the command recorded, which is the same whether the image was read
-from an archive or from a registry. When they match, the agent takes the
-directory over and pulls nothing. When they differ, it replaces the content.
-When the source cannot be resolved, it leaves the directory as it is, keeps
-the resource pending and tries again on the next pass. A directory imported
-under a name no resource ever carries stays until you remove it.
+Before it adopts a directory, the agent checks that it holds the image the
+resource asks for, by comparing layers. It reads no layer to do so. The same
+image is taken over without a pull, another image is replaced, and an
+unreachable source leaves the directory as it is. See
+[agent/DESIGN.md](agent/DESIGN.md#adopting-a-seeded-directory). A directory
+imported under a name no resource ever carries stays until you remove it.
 
 ### Building a cache image
 

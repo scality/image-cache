@@ -707,7 +707,7 @@ func TestAdoptOnlyChangesTheOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := s.Record(dir, "c")
+	got, err := s.ReadRecord(dir, "c")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -731,13 +731,13 @@ func TestAdoptOnlyChangesTheOwner(t *testing.T) {
 }
 
 // There is nothing to adopt, or to read, where no sentinel is.
-func TestAdoptAndRecordNeedASentinel(t *testing.T) {
+func TestAdoptAndReadRecordNeedASentinel(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
 	if err := s.Adopt(dir, "missing"); !errors.Is(err, ErrAdopt) {
 		t.Errorf("Adopt = %v, want ErrAdopt", err)
 	}
-	if _, err := s.Record(dir, "missing"); !errors.Is(err, ErrState) {
-		t.Errorf("Record = %v, want ErrState", err)
+	if _, err := s.ReadRecord(dir, "missing"); !errors.Is(err, ErrState) {
+		t.Errorf("ReadRecord = %v, want ErrState", err)
 	}
 }
 

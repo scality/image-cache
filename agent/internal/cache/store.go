@@ -120,9 +120,9 @@ var ErrAdopt = errors.New("adopting a seeded cache directory failed")
 // Foreign reports whether another writer than the agent wrote the directory.
 func (r Record) Foreign() bool { return r.Owner != "" && r.Owner != OwnerAgent }
 
-// Record returns what the sentinel of the named resource's directory
-// remembers. It is meant for a directory State reported Complete.
-func (s Store) Record(cachePath, name string) (Record, error) {
+// ReadRecord reads the record from the sentinel of the named resource's
+// directory. It is meant for a directory State reported Complete.
+func (s Store) ReadRecord(cachePath, name string) (Record, error) {
 	sn, err := s.readSentinel(cachePath, name)
 	if err != nil {
 		return Record{}, err

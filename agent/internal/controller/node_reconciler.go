@@ -109,7 +109,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 		if state != cache.Complete {
 			continue
 		}
-		rec, err := r.Store.Record(path, ic.Name)
+		rec, err := r.Store.ReadRecord(path, ic.Name)
 		switch {
 		case err != nil:
 			errs = append(errs, errors.Wrap(err, errors.WithProperty("resource", ic.Name)))

@@ -715,7 +715,7 @@ func matchingResource(name, source string) *imagecachev1alpha1.ImageCache {
 // ownerOf reads who the sentinel of dir says wrote it.
 func ownerOf(dir string) string {
 	GinkgoHelper()
-	rec, err := cache.Store{}.Record(filepath.Dir(dir), filepath.Base(dir))
+	rec, err := cache.Store{}.ReadRecord(filepath.Dir(dir), filepath.Base(dir))
 	Expect(err).NotTo(HaveOccurred())
 	return rec.Owner
 }

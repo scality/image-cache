@@ -48,6 +48,13 @@ patches:
 #  target:
 #    kind: DaemonSet
 
+# [REGISTRY-CA] To pull from a registry signed by a private CA, create a
+# ConfigMap named registry-ca in the agent's namespace, with the CA under the
+# ca.crt key, then uncomment the three lines below.
+#- path: manager_registry_ca_patch.yaml
+#  target:
+#    kind: DaemonSet
+
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- path: manager_webhook_patch.yaml

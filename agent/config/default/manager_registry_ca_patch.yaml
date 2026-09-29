@@ -1,0 +1,26 @@
+# This patch makes the manager trust a registry signed by a private CA. It
+# mounts the ca.crt key of the registry-ca ConfigMap, which you create in the
+# agent's namespace, and points --ca-file at it. The CA is added to the
+# system ones, and read once at startup: restart the DaemonSet after
+# rotating it.
+
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    mountPath: /etc/image-cache/registry-ca
+    name: registry-ca
+    readOnly: true
+
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --ca-file=/etc/image-cache/registry-ca/ca.crt
+
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: registry-ca
+    configMap:
+      name: registry-ca
+      items:
+        - key: ca.crt
+          path: ca.crt

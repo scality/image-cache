@@ -116,6 +116,19 @@ cannot, on a node that has hit its inotify limit or a cache path whose mount is
 missing, the agent says so in its logs and leans on the periodic pass. With
 zero there is no pass to lean on.
 
+A registry signed by a private CA needs `--ca-file`, a PEM file of CA
+certificates the agent trusts on top of the system ones. Uncomment the
+`[REGISTRY-CA]` patch in
+[`config/default/kustomization.yaml`](config/default/kustomization.yaml) and
+create a `registry-ca` ConfigMap holding the CA under `ca.crt` in the agent's
+namespace. The file is read once at startup, and an unusable one stops the
+agent there, so restart the DaemonSet after rotating the CA. Without it the
+pull fails on `x509: certificate signed by unknown authority`.
+
+On a test cluster set up by hand, `--insecure-skip-tls-verify` accepts any
+registry certificate instead. The agent logs a warning at startup. It excludes
+`--ca-file`, and no manifest here sets it: never use it on a real node.
+
 Leader election is deliberately absent. Every agent converges the node it runs
 on, so there is nothing to elect a leader for.
 

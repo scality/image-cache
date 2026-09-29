@@ -592,3 +592,64 @@ func TestImportFailsWhenALayerCannotBeFetched(t *testing.T) {
 		t.Errorf("the failed import left %v behind (%v)", entries, err)
 	}
 }
+
+// A CA that cannot be used is named, and stops the run before anything is
+// pulled: carrying on would only fail later on the certificate, sending the
+// reader to the registry instead of the file.
+func TestUnusableCAFileIsNamed(t *testing.T) {
+	cacheDir := t.TempDir()
+	ref := served(t, map[string][]byte{pauseTarPath: []byte("pause")})
+	caFile := filepath.Join(t.TempDir(), "absent.crt")
+
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir,
+		"--ca-file", caFile, ref)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (%s)", code, errOut)
+	}
+	if !strings.Contains(errOut, caFile) {
+		t.Errorf("stderr does not name %s: %s", caFile, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, resourceName)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the resource was written despite the CA: %v", err)
+	}
+}
+
+// An archive reaches no registry, so the CA is not read for one.
+func TestCAFileIsNotReadForAnArchive(t *testing.T) {
+	cacheDir := t.TempDir()
+	path := archive(t, map[string][]byte{pauseTarPath: []byte("pause")})
+
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir,
+		"--ca-file", filepath.Join(t.TempDir(), "absent.crt"), path)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
+	}
+}
+
+func TestSkippingTLSVerificationIsAnnounced(t *testing.T) {
+	cacheDir := t.TempDir()
+	ref := served(t, map[string][]byte{pauseTarPath: []byte("pause")})
+
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir,
+		"--insecure-skip-tls-verify", ref)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
+	}
+	if !strings.Contains(errOut, "not verified") {
+		t.Errorf("stderr does not warn about the skipped verification: %s", errOut)
+	}
+}
+
+func TestCAFileAndSkippingVerificationExcludeEachOther(t *testing.T) {
+	ref := served(t, map[string][]byte{pauseTarPath: []byte("pause")})
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", t.TempDir(),
+		"--ca-file", caFile, "--insecure-skip-tls-verify", ref)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (%s)", code, errOut)
+	}
+	if !strings.Contains(errOut, "--insecure-skip-tls-verify") {
+		t.Errorf("stderr does not name the conflicting flag: %s", errOut)
+	}
+}

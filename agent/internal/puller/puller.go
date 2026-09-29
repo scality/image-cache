@@ -3,8 +3,12 @@ package puller
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -22,6 +26,11 @@ var (
 	ErrReference = errors.New("invalid image reference")
 	// ErrPull covers reaching the registry and reading the image.
 	ErrPull = errors.New("pulling the image failed")
+	// ErrCA covers a registry CA file that cannot be read or holds no
+	// certificate.
+	ErrCA = errors.New("unusable registry CA")
+	// ErrTLS covers TLS settings that contradict each other.
+	ErrTLS = errors.New("conflicting registry TLS settings")
 )
 
 // Puller resolves an image reference and returns the entries of its layers.
@@ -33,19 +42,88 @@ type Puller interface {
 	Pull(ctx context.Context, ref string) (io.ReadCloser, string, error)
 }
 
-// Remote pulls linux/amd64 images from an OCI registry.
-type Remote struct{}
+// Remote pulls linux/amd64 images from an OCI registry. The zero value
+// trusts the system CAs only.
+type Remote struct {
+	// transport is nil for go-containerregistry's default.
+	transport http.RoundTripper
+}
+
+// TLS says how a Remote checks the registry certificate.
+type TLS struct {
+	// CAFile is a PEM file of CAs trusted on top of the system ones.
+	CAFile string
+	// SkipVerify accepts any certificate. It is meant for a test cluster set
+	// up by hand, never for a node.
+	SkipVerify bool
+}
+
+// NewRemote returns a Remote that checks certificates as cfg says. The CA
+// file is read once: a rotated CA needs a new Remote.
+func NewRemote(cfg TLS) (Remote, error) {
+	if cfg == (TLS{}) {
+		return Remote{}, nil
+	}
+	// The library declares its default as an *http.Transport.
+	return newRemote(cfg, remote.DefaultTransport.(*http.Transport))
+}
+
+// newRemote builds on base; tests hand it a transport that dials their own
+// server.
+func newRemote(cfg TLS, base *http.Transport) (Remote, error) {
+	t := base.Clone()
+	switch {
+	case cfg.CAFile != "" && cfg.SkipVerify:
+		return Remote{}, errors.Wrap(ErrTLS,
+			errors.WithDetail("a CA file is pointless when certificates are not verified"))
+	case cfg.SkipVerify:
+		t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
+	default:
+		pool, err := caPool(cfg.CAFile)
+		if err != nil {
+			return Remote{}, err
+		}
+		t.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	}
+	return Remote{transport: t}, nil
+}
+
+// caPool returns the system CAs plus those of the PEM file at path. The given
+// CA extends the pool rather than replacing it, so a registry behind a public
+// certificate stays reachable.
+func caPool(path string) (*x509.CertPool, error) {
+	bundle, err := os.ReadFile(path)
+	if err != nil {
+		return nil, errors.Wrap(ErrCA, errors.CausedBy(err), errors.WithProperty("path", path))
+	}
+	// A pool that cannot be loaded is a host without system CAs, which is
+	// what the distroless image would be without its bundle: start empty
+	// rather than refuse, the given CA may be all the registry needs.
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(bundle) {
+		return nil, errors.Wrap(ErrCA, errors.WithDetail("no PEM certificate in the file"),
+			errors.WithProperty("path", path))
+	}
+	return pool, nil
+}
 
 var platform = v1.Platform{OS: "linux", Architecture: "amd64"}
 
 // Pull implements Puller.
-func (Remote) Pull(ctx context.Context, ref string) (io.ReadCloser, string, error) {
+func (r Remote) Pull(ctx context.Context, ref string) (io.ReadCloser, string, error) {
 	parsed, err := name.ParseReference(ref)
 	if err != nil {
 		return nil, "", errors.Wrap(ErrReference, errors.CausedBy(err),
 			errors.WithProperty("source", ref))
 	}
-	img, err := remote.Image(parsed, remote.WithContext(ctx), remote.WithPlatform(platform))
+	opts := []remote.Option{remote.WithContext(ctx), remote.WithPlatform(platform)}
+	if r.transport != nil {
+		opts = append(opts, remote.WithTransport(r.transport))
+	}
+	img, err := remote.Image(parsed, opts...)
 	if err != nil {
 		return nil, "", errors.Wrap(ErrPull, errors.CausedBy(err),
 			errors.WithProperty("source", ref))

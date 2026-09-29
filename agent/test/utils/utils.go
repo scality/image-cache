@@ -52,6 +52,21 @@ func Run(cmd *exec.Cmd) (string, error) {
 	return string(output), nil
 }
 
+// KindNode returns the container of the kind cluster's control plane node,
+// the only node the e2e cluster has.
+func KindNode() string {
+	cluster := defaultKindCluster
+	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
+		cluster = v
+	}
+	return cluster + "-control-plane"
+}
+
+// OnKindNode runs a shell script as root on the kind node.
+func OnKindNode(script string) (string, error) {
+	return Run(exec.Command("docker", "exec", KindNode(), "sh", "-c", script))
+}
+
 // LoadImageToKindClusterWithName loads a local docker image to the kind cluster
 func LoadImageToKindClusterWithName(name string) error {
 	cluster := defaultKindCluster

@@ -326,8 +326,12 @@ Two deployment constraints follow from `cachePath` living on the host:
   declare.
 - **The host directory must be writable by UID 65532.** `fsGroup` does not
   apply to hostPath volumes. The sample manifest uses a root init container
-  that chowns the cache directory; integrators managing permissions at
-  provisioning time can drop it.
+  that chowns the cache directory. It also chowns what `imagecachectl`
+  seeded, since the command runs as root: the directories that hold a
+  sentinel and the hidden temporaries of an interrupted extraction. The agent
+  writes in them to adopt or replace them. It changes nothing else under the
+  shared path. Integrators managing permissions at provisioning time can drop
+  the init container, and then have to do the same.
 - **The namespace must enforce the `privileged` Pod Security Standard.**
   hostPath volumes are already disallowed at the `baseline` level, and the
   chown init container runs as root, so the agent's namespace needs

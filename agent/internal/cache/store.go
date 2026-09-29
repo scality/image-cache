@@ -59,8 +59,7 @@ const OwnerAgent = "image-cache-agent"
 type Record struct {
 	// Digest is the manifest digest the source served.
 	Digest string `json:"digest"`
-	// Owner is who wrote the directory. Empty means the agent: every
-	// sentinel written before owners were recorded is the agent's.
+	// Owner is who wrote the directory.
 	Owner string `json:"owner,omitempty"`
 	// Source is the reference or the archive path the content was read from,
 	// kept for whoever looks at the directory. Two sources naming the same
@@ -118,7 +117,7 @@ func (s Store) State(cachePath, name string) (State, error) {
 var ErrAdopt = errors.New("adopting a seeded cache directory failed")
 
 // Foreign reports whether another writer than the agent wrote the directory.
-func (r Record) Foreign() bool { return r.Owner != "" && r.Owner != OwnerAgent }
+func (r Record) Foreign() bool { return r.Owner != OwnerAgent }
 
 // ReadRecord reads the record from the sentinel of the named resource's
 // directory. It is meant for a directory State reported Complete.
@@ -401,11 +400,9 @@ func (s Store) SweepTemporaries(cachePath, name string) ([]string, error) {
 }
 
 // agentOwned reports whether dir bears a sentinel the agent wrote. No
-// sentinel means foreign content. An owner left empty means the agent, since
-// every sentinel written before owners were recorded is the agent's; reading
-// it the other way would leave every existing cluster with directories
-// nothing collects. A sentinel that does not parse is the agent's too, as it
-// has always been treated.
+// sentinel, or one that names another owner or none, means foreign content.
+// A sentinel that does not parse counts as the agent's: it is damaged, and
+// the file name is the store's own.
 func (Store) agentOwned(dir string) bool {
 	data, err := os.ReadFile(filepath.Join(dir, sentinelName))
 	if err != nil {
@@ -415,7 +412,7 @@ func (Store) agentOwned(dir string) bool {
 	if json.Unmarshal(data, &sn) != nil {
 		return true
 	}
-	return sn.Owner == "" || sn.Owner == OwnerAgent
+	return sn.Owner == OwnerAgent
 }
 
 // GC removes agent-owned directories (those whose sentinel names the agent,

@@ -113,8 +113,8 @@ complete and records who wrote it:
   and foreign directories in a shared cache path are never touched. The
   sentinel records its writer, and a directory `imagecachectl` wrote is left
   alone until a resource adopts it (see the one-shot command below). A
-  sentinel written before writers were recorded, or one that does not parse,
-  counts as the agent's.
+  sentinel that names no owner is foreign too. One that does not parse counts
+  as the agent's, since it is damaged.
 - **Completeness**: a directory without a sentinel is a partial extraction and
   is redone. The sentinel lists the expected file names, so a manually deleted
   tarball is detected and repaired.

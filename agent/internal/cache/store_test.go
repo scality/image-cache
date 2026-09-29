@@ -377,10 +377,10 @@ func TestState(t *testing.T) {
 
 func TestGCOwnershipRules(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
-	if err := s.Extract(t.Context(), dir, "old", Record{Digest: "d"}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
+	if err := s.Extract(t.Context(), dir, "old", Record{Digest: "d", Owner: OwnerAgent}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Extract(t.Context(), dir, "kept", Record{Digest: "d"}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
+	if err := s.Extract(t.Context(), dir, "kept", Record{Digest: "d", Owner: OwnerAgent}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
 	// Foreign directory (no sentinel) and flat file: must survive.
@@ -636,31 +636,9 @@ func TestExtractRecordsWhoWroteTheDirectoryAndFromWhat(t *testing.T) {
 	}
 }
 
-// A sentinel written before owners were recorded has none of the new fields,
-// and still reads as a complete resource.
-func TestAnOldSentinelStillReadsComplete(t *testing.T) {
-	dir, s := t.TempDir(), Store{}
-	if err := os.MkdirAll(filepath.Join(dir, "c"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "c", testTar), []byte("1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	old := `{"digest":"sha256:old","files":["` + testTar + `"]}`
-	if err := os.WriteFile(filepath.Join(dir, "c", sentinelName), []byte(old), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if st, err := s.State(dir, "c"); err != nil || st != Complete {
-		t.Errorf("state = %v, %v; want Complete", st, err)
-	}
-}
-
-// Garbage collection only removes what the agent wrote. A directory the
-// command seeded, before any resource claims it, has to survive: at install
-// the agent can land before the resources, and collecting the seeded cache
-// would pull the same gigabyte again. What the agent wrote, now or before
-// owners were recorded, is still collected, and so is a sentinel that does
-// not parse, as it always was.
+// Garbage collection only removes what the agent wrote, and a sentinel that
+// does not parse. A seeded directory has to survive until a resource claims
+// it: at install the agent can land before the resources.
 func TestGCLeavesADirectoryAnotherWriterOwns(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -669,7 +647,7 @@ func TestGCLeavesADirectoryAnotherWriterOwns(t *testing.T) {
 	}{
 		{"seeded by the command", `{"digest":"d","files":[],"owner":"` + otherOwner + `"}`, true},
 		{"written by the agent", `{"digest":"d","files":[],"owner":"` + OwnerAgent + `"}`, false},
-		{"written before owners existed", `{"digest":"d","files":[]}`, false},
+		{"naming no owner", `{"digest":"d","files":[]}`, true},
 		{"a sentinel that does not parse", `{not json`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -742,7 +720,7 @@ func TestAdoptAndReadRecordNeedASentinel(t *testing.T) {
 }
 
 func TestForeign(t *testing.T) {
-	for owner, want := range map[string]bool{"": false, OwnerAgent: false, otherOwner: true} {
+	for owner, want := range map[string]bool{"": true, OwnerAgent: false, otherOwner: true} {
 		if got := (Record{Owner: owner}).Foreign(); got != want {
 			t.Errorf("Foreign() with owner %q = %v, want %v", owner, got, want)
 		}

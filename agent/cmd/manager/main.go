@@ -66,6 +66,7 @@ func main() {
 	var enableHTTP2 bool
 	var resyncPeriod time.Duration
 	var caFile string
+	var skipVerify bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -90,6 +91,8 @@ func main() {
 	flag.StringVar(&caFile, "ca-file", "",
 		"A PEM file of CA certificates to trust for registries, on top of the system ones. "+
 			"Read once at startup: restart the agent after rotating it.")
+	flag.BoolVar(&skipVerify, "insecure-skip-tls-verify", false,
+		"Accept any registry certificate. For a test cluster set up by hand only.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -190,10 +193,13 @@ func main() {
 
 	// Checked before anything starts: an unusable CA would otherwise surface
 	// as a failed pull on every node and every resource.
-	remote, err := puller.NewRemote(caFile)
+	remote, err := puller.NewRemote(puller.TLS{CAFile: caFile, SkipVerify: skipVerify})
 	if err != nil {
-		setupLog.Error(err, "unable to load the registry CA")
+		setupLog.Error(err, "unable to set up registry TLS")
 		os.Exit(1)
+	}
+	if skipVerify {
+		setupLog.Info("WARNING: registry certificates are not verified (--insecure-skip-tls-verify)")
 	}
 
 	fw, err := controller.NewFSWatcher(nodeName)

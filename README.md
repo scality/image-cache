@@ -170,6 +170,8 @@ be absolute, the same rule the `ImageCache` field follows. `--ca-file` names a
 PEM file of CA certificates to trust for a registry signed by a private CA, on
 top of the system ones. It is checked on every run, and never read for an
 archive.
+`--insecure-skip-tls-verify` accepts any certificate instead, for a test
+cluster only, and prints a warning.
 
 The import refuses to replace a directory it did not write, that is one
 without the agent's sentinel in it. The cache path is shared and the command

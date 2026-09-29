@@ -625,3 +625,31 @@ func TestCAFileIsNotReadForAnArchive(t *testing.T) {
 		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
 	}
 }
+
+func TestSkippingTLSVerificationIsAnnounced(t *testing.T) {
+	cacheDir := t.TempDir()
+	ref := served(t, map[string][]byte{pauseTarPath: []byte("pause")})
+
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir,
+		"--insecure-skip-tls-verify", ref)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
+	}
+	if !strings.Contains(errOut, "not verified") {
+		t.Errorf("stderr does not warn about the skipped verification: %s", errOut)
+	}
+}
+
+func TestCAFileAndSkippingVerificationExcludeEachOther(t *testing.T) {
+	ref := served(t, map[string][]byte{pauseTarPath: []byte("pause")})
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", t.TempDir(),
+		"--ca-file", caFile, "--insecure-skip-tls-verify", ref)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (%s)", code, errOut)
+	}
+	if !strings.Contains(errOut, "--insecure-skip-tls-verify") {
+		t.Errorf("stderr does not name the conflicting flag: %s", errOut)
+	}
+}

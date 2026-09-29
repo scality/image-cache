@@ -24,9 +24,11 @@ type stubPuller struct {
 	pullErr  error
 	closeErr error
 	closed   bool
+	pulls    int
 }
 
 func (s *stubPuller) Pull(context.Context, string) (io.ReadCloser, puller.Image, error) {
+	s.pulls++
 	if s.pullErr != nil {
 		return nil, puller.Image{}, s.pullErr
 	}
@@ -122,5 +124,22 @@ func TestFillReportsAFailedCloseOnlyAfterASuccess(t *testing.T) {
 				t.Errorf("reported = %v (%v), want %v", got, heard, tc.reported)
 			}
 		})
+	}
+}
+
+// A directory the store cannot replace is refused before the pull.
+func TestFillRefusesAnUnreplaceableDirectoryBeforePulling(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, resource), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := &stubPuller{entries: map[string]string{"a.tar": "a"}}
+
+	err := Fill(t.Context(), cache.Store{}, p, dir, resource, "ref", cache.OwnerAgent, nil)
+	if !errors.Is(err, cache.ErrExtract) {
+		t.Fatalf("err = %v, want cache.ErrExtract", err)
+	}
+	if p.pulls != 0 {
+		t.Errorf("pulled %d times for a directory it could not replace", p.pulls)
 	}
 }

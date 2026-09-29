@@ -337,14 +337,17 @@ func entryKind(flag byte) string {
 	}
 }
 
-// replaceable reports whether the swap may remove what is already at final.
-// Only a directory bearing the sentinel may be, whoever wrote it: the cache
-// path is shared, and a name is not a claim on whatever happens to sit under
-// it, but a directory the store wrote under the resource's own name is that
-// resource's content to refresh. GC is stricter and also asks for the agent
-// as the writer, since it acts on names no resource claims. Without this, a resource named after a neighbour
-// of the cache path, or a cache path one level too high, turns the swap into
-// an rm -rf of somebody else's data.
+// Replaceable reports whether an extraction of the named resource may replace
+// what is already in its directory. Extract checks it again at the swap; a
+// caller asks first so that it does not pull an image it could not publish.
+func (s Store) Replaceable(cachePath, name string) error {
+	return s.replaceable(s.dir(cachePath, name), name)
+}
+
+// replaceable reports whether the swap may remove what is at final: only a
+// directory with a sentinel, whoever wrote it. The cache path is shared, so a
+// wrong name or cache path must not become an rm -rf of someone else's data.
+// GC is stricter: it also requires the agent as the writer.
 func (s Store) replaceable(final, name string) error {
 	if _, err := os.Stat(final); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -354,7 +357,16 @@ func (s Store) replaceable(final, name string) error {
 			errors.WithDetail("looking at the directory to replace"),
 			errors.WithProperty("resource", name))
 	}
-	if _, err := os.Stat(filepath.Join(final, sentinelName)); err != nil {
+	_, err := os.Stat(filepath.Join(final, sentinelName))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Unreadable is not absent: a permission error here points at who
+		// owns the directory, not at what it holds.
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("reading the sentinel of the directory to replace"),
+			errors.WithProperty("resource", name),
+			errors.WithProperty("directory", final))
+	}
+	if err != nil {
 		return errors.Wrap(ErrExtract,
 			errors.WithDetail("what is already there was not written by this, "+
 				"so it is left alone: remove it by hand if it should go"),

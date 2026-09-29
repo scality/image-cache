@@ -630,7 +630,7 @@ func TestExtractRecordsWhoWroteTheDirectoryAndFromWhat(t *testing.T) {
 	if err := json.Unmarshal(data, &sn); err != nil {
 		t.Fatal(err)
 	}
-	got := Record{Owner: sn.Owner, Source: sn.Source, Digest: sn.Digest, Layers: sn.Layers}
+	got := sn.Record
 	if !reflect.DeepEqual(got, rec) {
 		t.Errorf("sentinel = %+v, want %+v", got, rec)
 	}

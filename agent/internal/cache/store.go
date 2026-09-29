@@ -57,25 +57,24 @@ const OwnerAgent = "image-cache-agent"
 // Record is what the sentinel remembers about a directory's content, beyond
 // the files it lists.
 type Record struct {
+	// Digest is the manifest digest the source served.
+	Digest string `json:"digest"`
 	// Owner is who wrote the directory. Empty means the agent: every
 	// sentinel written before owners were recorded is the agent's.
-	Owner string
+	Owner string `json:"owner,omitempty"`
 	// Source is the reference or the archive path the content was read from,
 	// kept for whoever looks at the directory. Two sources naming the same
 	// image can differ, so it is not what an image is compared by.
-	Source string
-	// Digest is the manifest digest the source served.
-	Digest string
+	Source string `json:"source,omitempty"`
 	// Layers are the image's layer diff IDs, as puller.Image reports them.
-	Layers []string
+	Layers []string `json:"layers,omitempty"`
 }
 
+// sentinel is what the sentinel file holds: the record, and the files the
+// directory has to hold to be complete.
 type sentinel struct {
-	Digest string   `json:"digest"`
-	Files  []string `json:"files"`
-	Owner  string   `json:"owner,omitempty"`
-	Source string   `json:"source,omitempty"`
-	Layers []string `json:"layers,omitempty"`
+	Record
+	Files []string `json:"files"`
 }
 
 // Store reads and writes per-resource cache directories. Resource names are
@@ -128,7 +127,7 @@ func (s Store) Record(cachePath, name string) (Record, error) {
 	if err != nil {
 		return Record{}, err
 	}
-	return Record{Owner: sn.Owner, Source: sn.Source, Digest: sn.Digest, Layers: sn.Layers}, nil
+	return sn.Record, nil
 }
 
 // Adopt makes the agent the owner of a directory another writer seeded,
@@ -292,9 +291,7 @@ func (s Store) Extract(
 			errors.WithDetail("the image carries no file to cache"))
 	}
 
-	data, err := json.Marshal(sentinel{
-		Digest: rec.Digest, Files: files, Owner: rec.Owner, Source: rec.Source, Layers: rec.Layers,
-	})
+	data, err := json.Marshal(sentinel{Record: rec, Files: files})
 	if err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("encoding the sentinel"))

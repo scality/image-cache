@@ -18,6 +18,9 @@ import (
 // testTar is the file name used by fixtures that only need a single file.
 const testTar = "a.tar"
 
+// otherOwner is a writer that is not the agent, the command for one.
+const otherOwner = "imagecachectl"
+
 // testDigest is the manifest digest fixtures record when it does not matter.
 const testDigest = "sha256:abc"
 
@@ -615,7 +618,7 @@ func TestExtractRefusesAStreamEndingInAWrappedEOF(t *testing.T) {
 // it holds, next to the files it lists.
 func TestExtractRecordsWhoWroteTheDirectoryAndFromWhat(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
-	rec := Record{Owner: OwnerCommand, Source: "/mnt/iso/boot-cache.tar", Digest: "sha256:manifest", Layers: []string{"sha256:layer"}}
+	rec := Record{Owner: otherOwner, Source: "/mnt/iso/boot-cache.tar", Digest: "sha256:manifest", Layers: []string{"sha256:layer"}}
 	if err := s.Extract(t.Context(), dir, "c", rec, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +667,7 @@ func TestGCLeavesADirectoryAnotherWriterOwns(t *testing.T) {
 		sentinel string
 		kept     bool
 	}{
-		{"seeded by the command", `{"digest":"d","files":[],"owner":"` + OwnerCommand + `"}`, true},
+		{"seeded by the command", `{"digest":"d","files":[],"owner":"` + otherOwner + `"}`, true},
 		{"written by the agent", `{"digest":"d","files":[],"owner":"` + OwnerAgent + `"}`, false},
 		{"written before owners existed", `{"digest":"d","files":[]}`, false},
 		{"a sentinel that does not parse", `{not json`, false},
@@ -696,7 +699,7 @@ func TestGCLeavesADirectoryAnotherWriterOwns(t *testing.T) {
 // command wrote them, and the directory still reads complete.
 func TestAdoptOnlyChangesTheOwner(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
-	seeded := Record{Owner: OwnerCommand, Source: "/mnt/iso/boot-cache.tar", Digest: "sha256:manifest", Layers: []string{"sha256:layer"}}
+	seeded := Record{Owner: otherOwner, Source: "/mnt/iso/boot-cache.tar", Digest: "sha256:manifest", Layers: []string{"sha256:layer"}}
 	if err := s.Extract(t.Context(), dir, "c", seeded, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
@@ -739,7 +742,7 @@ func TestAdoptAndRecordNeedASentinel(t *testing.T) {
 }
 
 func TestForeign(t *testing.T) {
-	for owner, want := range map[string]bool{"": false, OwnerAgent: false, OwnerCommand: true} {
+	for owner, want := range map[string]bool{"": false, OwnerAgent: false, otherOwner: true} {
 		if got := (Record{Owner: owner}).Foreign(); got != want {
 			t.Errorf("Foreign() with owner %q = %v, want %v", owner, got, want)
 		}

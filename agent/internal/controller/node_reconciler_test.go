@@ -25,6 +25,7 @@ import (
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 	"github.com/scality/image-cache/agent/internal/cache"
+	"github.com/scality/image-cache/agent/internal/cli"
 	"github.com/scality/image-cache/agent/internal/puller"
 )
 
@@ -391,7 +392,7 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 	It("leaves a directory the command seeded alone until a resource claims it", func() {
 		seeded := filepath.Join(cacheDir, "seeded-134-0-0")
 		orphan := filepath.Join(cacheDir, "orphan-134-0-0")
-		for dir, owner := range map[string]string{seeded: cache.OwnerCommand, orphan: cache.OwnerAgent} {
+		for dir, owner := range map[string]string{seeded: cli.Owner, orphan: cache.OwnerAgent} {
 			Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
 			Expect(os.WriteFile(filepath.Join(dir, etcdTarName), []byte("etcd"), 0o644)).To(Succeed())
 			sentinel := `{"digest":"d","files":["` + etcdTarName + `"],"owner":"` + owner + `"}`
@@ -485,7 +486,7 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 		Consistently(func() ([]byte, error) {
 			return os.ReadFile(filepath.Join(dir, etcdTarName))
 		}, "2s").Should(Equal([]byte(seededContent)))
-		Expect(ownerOf(dir)).To(Equal(cache.OwnerCommand))
+		Expect(ownerOf(dir)).To(Equal(cli.Owner))
 		Expect(testPuller.pullsOf(source)).To(BeZero())
 
 		By("letting the registry answer again")
@@ -693,7 +694,7 @@ func seedDirectory(name, layer string) string {
 	dir := filepath.Join(cacheDir, name)
 	Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
 	Expect(os.WriteFile(filepath.Join(dir, etcdTarName), []byte(seededContent), 0o644)).To(Succeed())
-	sentinel := `{"digest":"sha256:seeded","files":["` + etcdTarName + `"],"owner":"` + cache.OwnerCommand +
+	sentinel := `{"digest":"sha256:seeded","files":["` + etcdTarName + `"],"owner":"` + cli.Owner +
 		`","source":"/mnt/iso/boot-cache.tar","layers":["` + layer + `"]}`
 	Expect(os.WriteFile(filepath.Join(dir, ".image-cache-agent.json"), []byte(sentinel), 0o644)).To(Succeed())
 	return dir

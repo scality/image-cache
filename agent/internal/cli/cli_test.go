@@ -635,8 +635,8 @@ func TestImportRecordsTheSameImageWhateverTheSource(t *testing.T) {
 			t.Fatalf("%s: exit = %d (%s)", src, code, errOut)
 		}
 		r := readSentinel(t, cacheDir)
-		if r.Owner != cache.OwnerCommand {
-			t.Errorf("%s: owner = %q, want %q", src, r.Owner, cache.OwnerCommand)
+		if r.Owner != Owner {
+			t.Errorf("%s: owner = %q, want %q", src, r.Owner, Owner)
 		}
 		if r.Source != src {
 			t.Errorf("source = %q, want %q", r.Source, src)

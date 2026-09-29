@@ -52,6 +52,9 @@ const helpFlag = "--help"
 // set cannot drift apart.
 const importCommand = "import"
 
+// Owner is the owner the command writes in a sentinel.
+const Owner = "imagecachectl"
+
 const usage = `Usage: imagecachectl import --name <resource> [--cache-path <dir>] <source>
 
 Fills the image cache with the archives a boot cache image carries.
@@ -197,7 +200,7 @@ func do(ctx context.Context, cachePath, name, source string, out, errOut io.Writ
 		printf(out, "cleared %d leftover directory from an interrupted run\n", len(swept))
 	}
 
-	if err := fill.Fill(ctx, store, pullerFor(source), cachePath, name, source, cache.OwnerCommand, func(cerr error) {
+	if err := fill.Fill(ctx, store, pullerFor(source), cachePath, name, source, Owner, func(cerr error) {
 		printf(errOut, "imagecachectl: closing the image stream: %s\n", cerr)
 	}); err != nil {
 		return err

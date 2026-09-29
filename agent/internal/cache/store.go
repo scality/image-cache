@@ -49,13 +49,10 @@ const (
 	Complete
 )
 
-// Owners a sentinel names. Garbage collection only removes what the agent
-// wrote, so a directory another writer seeded stays until the agent claims
-// it.
-const (
-	OwnerAgent   = "image-cache-agent"
-	OwnerCommand = "imagecachectl"
-)
+// OwnerAgent is the owner the agent writes in a sentinel. Garbage collection
+// only removes what the agent wrote: any other owner is foreign, and its
+// directory stays until the agent claims it.
+const OwnerAgent = "image-cache-agent"
 
 // Record is what the sentinel remembers about a directory's content, beyond
 // the files it lists.

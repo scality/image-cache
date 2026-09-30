@@ -42,17 +42,24 @@ const importLong = `Fills the image cache with the archives a boot cache image c
 <source> is either the path of a docker archive or the reference of an image
 in a registry. It is a path when it starts with a separator or a dot, or ends
 in .tar, and a reference otherwise: the shape of what you pass decides, not
-what is on disk. Give an archive named something else as ./that-name.`
+what is on disk.`
+
+const importExample = `  imagecachectl import --name worker-1-0-0 registry.example.com/boot-cache-worker:1.0.0
+  imagecachectl import --name worker-1-0-0 /mnt/iso/images/boot-cache-worker.tar
+  imagecachectl import --name worker-1-0-0 ./boot-cache-worker.archive`
 
 // Run executes the command line and returns the process exit code: 0 on
 // success, ExitInterrupted when the context was cancelled, 1 otherwise.
 func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	var name, cachePath string
 	importCmd := &cobra.Command{
-		Use:   "import --name <resource> [--cache-path <dir>] <source>",
-		Short: "Fill the image cache from a registry or a docker archive",
-		Long:  importLong,
-		Args:  cobra.ExactArgs(1),
+		Use:     "import --name <resource> [--cache-path <dir>] <source>",
+		Short:   "Fill the image cache from a registry or a docker archive",
+		Long:    importLong,
+		Example: importExample,
+		Args:    cobra.ExactArgs(1),
+		// Use already lists the flags.
+		DisableFlagsInUseLine: true,
 		// Validated here and not in PreRunE: cobra checks the required
 		// flags after PreRunE, so a missing --name would read as an invalid
 		// one.
@@ -60,7 +67,13 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 			if err := validate(name, cachePath); err != nil {
 				return err
 			}
-			return do(cmd.Context(), cachePath, name, args[0], out, errOut)
+			err := do(cmd.Context(), cachePath, name, args[0], out, errOut)
+			// An interrupted run is not a failure to diagnose: the extraction
+			// publishes by rename, so nothing half written is left behind.
+			if errors.Is(err, context.Canceled) {
+				return fmt.Errorf("interrupted, %s was not filled: %w", name, context.Canceled)
+			}
+			return err
 		},
 	}
 	importCmd.Flags().StringVar(&name, "name", "",
@@ -71,30 +84,24 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	root := &cobra.Command{
 		Use:   "imagecachectl",
 		Short: "Fill a node's image cache once",
-		// Errors are printed below, without the usage: after an error, cobra
-		// prints the usage on the standard output.
-		SilenceErrors: true,
-		SilenceUsage:  true,
+		// After an error, cobra prints the usage on the standard output.
+		SilenceUsage: true,
 	}
+	root.SetErrPrefix("imagecachectl:")
 	root.CompletionOptions.DisableDefaultCmd = true
 	root.AddCommand(importCmd)
 	root.SetArgs(args)
 	root.SetOut(out)
 	root.SetErr(errOut)
 
-	err := root.ExecuteContext(ctx)
-	switch {
+	switch err := root.ExecuteContext(ctx); {
 	case err == nil:
 		return 0
-	// An interrupted run is not a failure to diagnose: the extraction
-	// publishes by rename, so nothing half written is left behind.
 	case errors.Is(err, context.Canceled):
-		printf(errOut, "imagecachectl: interrupted, %s was not filled\n", name)
 		return ExitInterrupted
+	default:
+		return 1
 	}
-	// %s and not %v: go-errors renders JSON under %v.
-	printf(errOut, "imagecachectl: %s\n", err)
-	return 1
 }
 
 // validate checks what the store takes on trust. The store joins the name to

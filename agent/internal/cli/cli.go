@@ -42,11 +42,7 @@ const importLong = `Fills the image cache with the archives a boot cache image c
 <source> is either the path of a docker archive or the reference of an image
 in a registry. It is a path when it starts with a separator or a dot, or ends
 in .tar, and a reference otherwise: the shape of what you pass decides, not
-what is on disk. Give an archive named something else as ./that-name.
-
---name is the name of the ImageCache resource this content belongs to. It is
-the directory the archives land in, and the agent recognises the resource by
-it, so it must be the name the resource will carry.`
+what is on disk. Give an archive named something else as ./that-name.`
 
 // Run executes the command line and returns the process exit code: 0 on
 // success, ExitInterrupted when the context was cancelled, 1 otherwise.
@@ -67,8 +63,9 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 			return do(cmd.Context(), cachePath, name, args[0], out, errOut)
 		},
 	}
-	importCmd.Flags().StringVar(&name, "name", "", "name of the ImageCache resource this content belongs to")
-	importCmd.Flags().StringVar(&cachePath, "cache-path", cache.DefaultPath, "directory the archives are extracted under")
+	importCmd.Flags().StringVar(&name, "name", "",
+		"name of the ImageCache `resource` this content belongs to: the agent finds the content by it")
+	importCmd.Flags().StringVar(&cachePath, "cache-path", cache.DefaultPath, "`directory` the archives are extracted under")
 	_ = importCmd.MarkFlagRequired("name")
 
 	root := &cobra.Command{

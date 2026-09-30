@@ -27,6 +27,7 @@ const (
 	resourceName = "worker-1-0-0"
 	importCmd    = "import"
 	nameFlag     = "--name"
+	helpFlag     = "--help"
 	etcdTarPath  = "images/etcd.tar"
 	pauseTarPath = "images/pause.tar"
 	sentinelName = ".image-cache-agent.json"
@@ -133,11 +134,11 @@ func TestSecondRunTouchesNothing(t *testing.T) {
 func TestNameIsRequired(t *testing.T) {
 	src := archive(t, map[string][]byte{etcdTarPath: []byte("etcd")})
 	code, _, errOut := run(t, importCmd, "--cache-path", t.TempDir(), src)
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2", code)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
 	}
-	if !strings.Contains(errOut, "name") {
-		t.Errorf("stderr = %q, want it to name the missing flag", errOut)
+	if !strings.Contains(errOut, `required flag(s) "name" not set`) {
+		t.Errorf("stderr = %q, want it to say --name is missing, not invalid", errOut)
 	}
 }
 
@@ -146,8 +147,8 @@ func TestExactlyOneSource(t *testing.T) {
 		{importCmd, nameFlag, resourceName},
 		{importCmd, nameFlag, resourceName, "one.tar", "two.tar"},
 	} {
-		if code, _, _ := run(t, args...); code != 2 {
-			t.Errorf("%v: exit = %d, want 2", args, code)
+		if code, _, _ := run(t, args...); code != 1 {
+			t.Errorf("%v: exit = %d, want 1", args, code)
 		}
 	}
 }
@@ -181,8 +182,8 @@ func TestMissingArchiveIsNotTreatedAsAReference(t *testing.T) {
 
 func TestUnknownFlag(t *testing.T) {
 	code, _, errOut := run(t, importCmd, "--nope", nameFlag, resourceName, "x.tar")
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2", code)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
 	}
 	if !strings.Contains(errOut, "nope") {
 		t.Errorf("stderr = %q, want it to name the flag", errOut)
@@ -244,8 +245,8 @@ func TestNameCannotEscapeTheCachePath(t *testing.T) {
 			t.Fatal(err)
 		}
 		code, _, errOut := run(t, importCmd, nameFlag, name, "--cache-path", cacheDir, src)
-		if code != 2 {
-			t.Errorf("--name %q: exit = %d, want 2 (%s)", name, code, errOut)
+		if code != 1 {
+			t.Errorf("--name %q: exit = %d, want 1 (%s)", name, code, errOut)
 		}
 		if _, err := os.Stat(witness); err != nil {
 			t.Errorf("--name %q: destroyed %s", name, witness)
@@ -293,7 +294,7 @@ func TestASourceShapedLikeAReferenceIsNotReadFromDisk(t *testing.T) {
 }
 
 // And an archive whose name looks like neither is given as a path, which is
-// what the usage tells the caller to do.
+// what the help tells the caller to do.
 func TestAnArchiveGivenAsAPathIsReadAsOne(t *testing.T) {
 	cacheDir := t.TempDir()
 	src := archive(t, map[string][]byte{etcdTarPath: []byte("etcd")})
@@ -338,52 +339,46 @@ func TestNameLongerThanAResourceAllows(t *testing.T) {
 	src := archive(t, map[string][]byte{etcdTarPath: []byte("etcd")})
 	code, _, errOut := run(t, importCmd, nameFlag, strings.Repeat("a", 64),
 		"--cache-path", t.TempDir(), src)
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2", code)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
 	}
 	if !strings.Contains(errOut, "63") {
 		t.Errorf("stderr = %q, want it to give the limit", errOut)
 	}
 }
 
-// Asking for help is not a mistake, so it goes to the standard output, alone
-// and once, and it succeeds. Every form gets the flag list too: the banner
-// ends on an Options: heading, so printing it without the list leaves the
-// heading empty.
+// Help is a request, not a mistake: it goes to the standard output and
+// succeeds. The import's own help lists the default cache path.
 func TestHelpGoesToStdoutAndSucceeds(t *testing.T) {
-	for _, args := range [][]string{{"help"}, {"-h"}, {helpFlag}, {importCmd, helpFlag}} {
+	for _, args := range [][]string{{}, {"help"}, {"-h"}, {helpFlag}, {"help", importCmd}, {importCmd, helpFlag}} {
 		var out, errOut strings.Builder
-		code := Run(context.Background(), args, &out, &errOut)
-		if code != 0 {
+		if code := Run(context.Background(), args, &out, &errOut); code != 0 {
 			t.Errorf("%v: exit = %d, want 0", args, code)
 		}
-		if n := strings.Count(out.String(), "Usage: imagecachectl"); n != 1 {
-			t.Errorf("%v: usage printed %d times on stdout, want once: %q", args, n, out.String())
+		if !strings.Contains(out.String(), importCmd) {
+			t.Errorf("%v: help does not name the import: %q", args, out.String())
 		}
-		// The flag package prints its own usage on the way to ErrHelp unless
-		// it is told not to, which put the whole thing on stderr as well.
 		if errOut.Len() != 0 {
 			t.Errorf("%v: help wrote to stderr: %q", args, errOut.String())
 		}
-		// The defaults belong there, since the banner does not repeat them.
-		if !strings.Contains(out.String(), cache.DefaultPath) {
-			t.Errorf("%v: help does not say where the cache goes by default: %q", args, out.String())
-		}
+	}
+	var out strings.Builder
+	Run(context.Background(), []string{importCmd, helpFlag}, &out, &strings.Builder{})
+	if !strings.Contains(out.String(), cache.DefaultPath) {
+		t.Errorf("import help does not say where the cache goes by default: %q", out.String())
 	}
 }
 
-// A mistake gets the same block, once, and on the error output.
-func TestUsageOnAMistakeIsPrintedOnceOnStderr(t *testing.T) {
-	for _, args := range [][]string{{}, {"export"}, {importCmd, "-nope"}, {importCmd}} {
+// A mistake is reported on the error output only, with no usage: the
+// standard output stays clean for whoever reads it.
+func TestAMistakeIsReportedOnStderrOnly(t *testing.T) {
+	for _, args := range [][]string{{"export"}, {importCmd, "--nope"}, {importCmd}} {
 		var out, errOut strings.Builder
-		if code := Run(context.Background(), args, &out, &errOut); code != 2 {
-			t.Errorf("%v: exit = %d, want 2", args, code)
+		if code := Run(context.Background(), args, &out, &errOut); code != 1 {
+			t.Errorf("%v: exit = %d, want 1", args, code)
 		}
-		if n := strings.Count(errOut.String(), "Usage: imagecachectl"); n != 1 {
-			t.Errorf("%v: usage printed %d times on stderr, want once: %q", args, n, errOut.String())
-		}
-		if !strings.Contains(errOut.String(), cache.DefaultPath) {
-			t.Errorf("%v: usage is missing the flag list: %q", args, errOut.String())
+		if !strings.HasPrefix(errOut.String(), "imagecachectl: ") {
+			t.Errorf("%v: stderr = %q, want an imagecachectl: message", args, errOut.String())
 		}
 		if out.Len() != 0 {
 			t.Errorf("%v: a mistake wrote to stdout: %q", args, out.String())
@@ -393,8 +388,8 @@ func TestUsageOnAMistakeIsPrintedOnceOnStderr(t *testing.T) {
 
 func TestUnknownCommandIsNamed(t *testing.T) {
 	code, _, errOut := run(t, "export", nameFlag, resourceName, "x.tar")
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2", code)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
 	}
 	if !strings.Contains(errOut, "export") {
 		t.Errorf("stderr = %q, want it to name the command", errOut)
@@ -409,8 +404,8 @@ func TestCachePathCannotBeRelativeOrClimb(t *testing.T) {
 
 	for _, path := range []string{"cache", "./cache", "/var/lib/../lib/image-cache", ""} {
 		code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", path, src)
-		if code != 2 {
-			t.Errorf("--cache-path %q: exit = %d, want 2 (%s)", path, code, errOut)
+		if code != 1 {
+			t.Errorf("--cache-path %q: exit = %d, want 1 (%s)", path, code, errOut)
 		}
 		if !strings.Contains(errOut, "--cache-path") {
 			t.Errorf("--cache-path %q: stderr does not name the flag: %q", path, errOut)

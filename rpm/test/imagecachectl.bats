@@ -46,26 +46,24 @@ setup_file() {
     [ "$output" = "/usr/bin/imagecachectl" ]
 }
 
-@test "the installed command answers with its usage" {
+@test "the installed command answers with its help" {
     run /usr/bin/imagecachectl
-    [ "$status" -eq 2 ]
-    echo "$output" | grep -q "imagecachectl import"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "import"
 }
 
-# The usage ends on an Options: heading the flag list fills in, and the help
-# request succeeds rather than reporting a mistake.
+# A help request succeeds rather than reporting a mistake.
 @test "the installed command prints its flags under help" {
-    run /usr/bin/imagecachectl --help
+    run /usr/bin/imagecachectl import --help
     [ "$status" -eq 0 ]
-    echo "$output" | grep -q -- "-cache-path"
-    echo "$output" | grep -q -- "-name"
-    [ "$(echo "$output" | grep -c "Usage: imagecachectl")" -eq 1 ]
+    echo "$output" | grep -q -- "--cache-path"
+    echo "$output" | grep -q -- "--name"
 }
 
 @test "the installed command refuses a source without a name" {
     run /usr/bin/imagecachectl import /tmp/whatever.tar
-    [ "$status" -eq 2 ]
-    echo "$output" | grep -q -- "--name"
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -qF 'required flag(s) "name" not set'
 }
 
 # CONTRIBUTING says every spec passes rpmlint, and nothing was running it on

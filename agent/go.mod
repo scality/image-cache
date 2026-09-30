@@ -8,6 +8,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.29.0
 	github.com/onsi/gomega v1.41.0
 	github.com/scality/go-errors v1.3.0
+	github.com/spf13/cobra v1.10.2
 	go.uber.org/zap v1.27.1
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0
@@ -59,7 +60,6 @@ require (
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/procfs v0.19.2 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/stoewer/go-strcase v1.3.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect

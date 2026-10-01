@@ -70,6 +70,16 @@ run_preload() {
     run --separate-stderr env "PATH=$BIN:$PATH" "IMAGE_CACHE_DIR=$CACHE" "$@" bash "$SCRIPT"
 }
 
+# Run the script with both streams in one file, and JOURNAL_STREAM naming that
+# file's identity, so the script takes it for the journal socket.
+run_preload_on_journal() {
+    : > "$TMP/journal"
+    # shellcheck disable=SC2016 # expanded by the inner bash, not here
+    run env "PATH=$BIN:$PATH" "IMAGE_CACHE_DIR=$CACHE" \
+        "JOURNAL_STREAM=$(stat -L -c '%d:%i' "$TMP/journal")" \
+        bash -c 'bash "$1" >> "$2" 2>&1' _ "$SCRIPT" "$TMP/journal"
+}
+
 @test "imports .tar files and ignores the rest" {
     : > "$CACHE/a.tar"
     : > "$CACHE/b.tar"
@@ -225,6 +235,46 @@ run_preload() {
     [ -z "$stderr" ]
     [ "$(grep -c . "$CTR_LOG")" -eq 1 ]
     [[ "$output" == *"Skipping $CACHE/worker-134-0-0/etcd.tar"* ]]
+}
+
+@test "a successful run ends with what it imported" {
+    : > "$CACHE/a.tar"
+    : > "$CACHE/b.tar"
+    run_preload
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Imported 2 of the 2 cached archives (0 no longer there)"* ]]
+}
+
+@test "an empty cache says there was nothing to import" {
+    run_preload
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"No cached archives to import in $CACHE"* ]]
+}
+
+@test "on the journal, failures are errors and the rest is info" {
+    fail_on bad.tar
+    : > "$CACHE/bad.tar"
+    : > "$CACHE/good.tar"
+    run_preload_on_journal
+    [ "$status" -eq 1 ]
+    grep -qxF "<6>Importing $CACHE/good.tar" "$TMP/journal"
+    grep -qxF "<3>Failed to import $CACHE/bad.tar" "$TMP/journal"
+    grep -qxF "<3>Failed to import 1 of the 2 cached archives (1 imported, 0 no longer there)" "$TMP/journal"
+}
+
+@test "on the journal, a cache with nothing left is a warning" {
+    ln -s "$TMP/never-existed" "$CACHE/a.tar"
+    run_preload_on_journal
+    [ "$status" -eq 0 ]
+    grep -qxF "<4>None of the 1 cached archives were still there to import" "$TMP/journal"
+}
+
+@test "an inherited JOURNAL_STREAM does not prefix a terminal's output" {
+    : > "$CACHE/a.tar"
+    run_preload "JOURNAL_STREAM=0:0"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "Importing $CACHE/a.tar"* ]]
+    [[ "$output" != *"<"* ]]
 }
 
 @test "does not import tars from hidden or deeper directories" {

@@ -1017,6 +1017,21 @@ func TestNewRemoteWithoutCAKeepsTheDefaultTransport(t *testing.T) {
 	}
 }
 
+// The library default is a package global: a zero Remote uses it, so a TLS
+// setting written on it would apply there too.
+func TestNewRemoteLeavesTheLibraryDefaultAlone(t *testing.T) {
+	def := remote.DefaultTransport.(*http.Transport)
+	before := def.TLSClientConfig
+	t.Cleanup(func() { def.TLSClientConfig = before })
+
+	if _, err := NewRemote(TLS{SkipVerify: true}); err != nil {
+		t.Fatal(err)
+	}
+	if def.TLSClientConfig != before {
+		t.Errorf("remote.DefaultTransport TLS config = %+v, want it unchanged", def.TLSClientConfig)
+	}
+}
+
 func TestNewRemoteRefusesAnUnusableCAFile(t *testing.T) {
 	dir := t.TempDir()
 	notPEM := filepath.Join(dir, "ca.crt")

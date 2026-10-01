@@ -87,6 +87,13 @@ exits zero: deciding that an empty cache is wrong is the caller's call, not
 this script's. A pipeline that reads "wrote to stderr" as "failed" will see
 that line, so read the exit status.
 
+Every run ends with one line that says what it did. Under systemd, each line
+carries its syslog priority: failures are `err`, a cache with nothing left is
+`warning`, the rest is `info`. So `journalctl -u containerd-image-preload -p err`
+shows only the failed imports. The journal adds the timestamps. Run by hand,
+the script prints plain lines with no priority prefix. Lines that `ctr` writes
+itself stay at `info`.
+
 ## Development
 
 Docker is the only requirement. Everything builds and runs inside a Rocky Linux

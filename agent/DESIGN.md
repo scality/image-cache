@@ -118,8 +118,14 @@ complete and agent-owned:
 
 The name is the agent's own: an entry carrying it inside a cache image is
 skipped, so the sentinel always describes what the agent extracted. Entries
-are extracted by base name and only regular files are kept, so nothing in an
-image can write outside its directory.
+are extracted by base name, so nothing in an image can write outside its
+directory. Directory entries are skipped, since everything lands flat, and any
+other kind of entry refuses the image whole. A symbolic link or a device is
+not written out, and skipping it would publish a resource short of an archive
+while the sentinel calls it complete. `docker build` copies a symbolic link as
+it finds it, dangling if it pointed outside the build context, which is how
+that would happen. A hard link could be recreated from its target, but a boot
+cache image has no use for one.
 
 Extraction is atomic for a first extraction: layers are extracted to a
 temporary directory next to the target, the sentinel is written, then the
@@ -204,8 +210,13 @@ leave a finalizer behind and block the deletion forever.
 Pulling and extraction use
 [go-containerregistry](https://github.com/google/go-containerregistry):
 
-- Pulling an image and walking its layers is its core use case; the flattened
-  filesystem comes out of `mutate.Extract`.
+- Pulling an image and walking its layers is its core use case. The layers
+  are read one after the other and their entries passed on as they are, not
+  through `mutate.Extract`: that one flattens the image, and on the way it
+  drops every relative link whose target leaves the image root, which is the
+  one link the store most needs to refuse. A boot cache image is built from
+  scratch and only adds files, so the flattening buys nothing, and a layer
+  that deletes a file of an earlier one is refused instead.
 - Multi-arch indexes are resolved client-side (`remote.WithPlatform`), which
   is exactly what a static, spec-compliant registry expects from its clients.
 - Its in-memory registry (`pkg/registry`) lets tests exercise the real pull
@@ -216,6 +227,41 @@ and mountable with `ctr` by provisioning tooling), so an artifact-oriented
 client such as oras-go would bring no benefit here. The puller sits behind a
 small interface in its own package, so the implementation can change without
 touching the reconciler.
+
+## The one-shot command
+
+A node being installed has no Kubernetes to run the agent in, and its kubelet
+needs images before it starts. `imagecachectl` does one resource's worth of
+that work from a command, and ships in its own RPM.
+
+It is the same two pieces behind a different entry point: the puller above,
+with a second implementation reading a docker archive on disk (the form the
+installation media carries, where there is no registry to reach), and the same
+store, so the layout and the sentinel are the agent's, not a second format.
+
+Three consequences worth stating:
+
+- **The name is the caller's.** It becomes the resource directory, and the
+  agent recognises a resource by it. Given the name the `ImageCache` will
+  carry, the agent finds the sentinel, reads it as complete, and pulls
+  nothing. Given any other name, garbage collection removes the directory,
+  since it bears the agent's sentinel and nothing claims it. That only holds
+  under a cache path the agent scans, which is the default one plus the paths
+  declared by resources: a directory imported under `--cache-path /srv/images`
+  is the caller's to clean up, because nothing points the agent at it. The
+  command validates the name as a DNS-1123 subdomain, the rule the API server
+  applies to the resource, so the two cannot disagree on what a name is.
+- **It replaces only what the store wrote.** The swap that publishes a
+  resource removes whatever is at the destination first, so it refuses a
+  directory that does not bear the sentinel. The cache path is shared, and a
+  name is not a claim on what happens to sit under it: without the check, a
+  resource named after a neighbour of the cache path, or a cache path one
+  level too high, is an `rm -rf` of somebody else's data, run as root.
+- **It fills once.** The state of the directory decides, not a comparison
+  against the registry: once a resource is complete the command reaches no
+  registry, whatever the source now points at. Keeping a node up to date is
+  the agent's job, and a command that ran again on every convergence would be
+  a second, weaker one.
 
 ## Container image and deployment
 

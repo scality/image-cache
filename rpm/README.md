@@ -4,13 +4,18 @@ A systemd service and timer that import container image tarballs from a local
 directory into containerd, on boot and every ten minutes. No Kubernetes client,
 no registry, no network: it works on a node whose cluster is down.
 
-It is one half of [image-cache](../README.md). The other half, the
-[image-cache-agent](../agent/README.md), fills that directory from a cluster.
-They share the directory and nothing else, so this package is useful on its own
-wherever the tarballs come from. See [../DESIGN.md](../DESIGN.md) for the split
-between the two.
+It is the part of [image-cache](../README.md) that reads the cache. The
+[image-cache-agent](../agent/README.md) fills that directory from a cluster, and
+`imagecachectl` fills it once on a node being installed. They share the
+directory and nothing else, so this package is useful on its own wherever the
+tarballs come from. See [../DESIGN.md](../DESIGN.md) for how the parts split.
 
 All the commands below run from this directory.
+
+> This directory builds two packages. This page is about
+> `containerd-image-preload`; the other one wraps the `imagecachectl` command,
+> and the [root README](../README.md#the-import-command) covers what it does.
+> `make test` and `make rpm` build and check both.
 
 ## Installing
 
@@ -74,16 +79,17 @@ missing cache directory imports nothing and succeeds.
 
 ## Development
 
-Docker is the only requirement. Everything builds and runs inside a Rocky Linux
-container, pinned by digest per major version, so the result does not depend on
-your host.
+The packaging runs inside a Rocky Linux container, pinned by digest per major
+version, so it does not depend on your host. Go is needed as well: the
+`imagecachectl` package wraps a binary compiled outside that container, which
+carries the packaging toolchain and no compiler.
 
 ```console
-make test EL=9       # shellcheck, the bats suites and rpmlint
-make rpm EL=9        # build into _build/, owned by you rather than by root
+make test EL=9       # shellcheck, the bats suites and rpmlint, for both packages
+make rpm EL=9        # build both into _build/, owned by you rather than by root
 make lint            # shellcheck and rpmlint alone
 make image EL=8      # just the toolchain image
-make clean           # remove _build/
+make clean           # remove _build/ and the binary staged for packaging
 ```
 
 `EL` selects the target, 8 or 9, and both are supported: keep out of any bash,

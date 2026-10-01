@@ -5,10 +5,13 @@ A DaemonSet that keeps the container image cache of each node in sync with the
 tarballs they carry into the cache directory, garbage-collects what is no
 longer declared, and reports per-node progress as node labels.
 
-It is one half of [image-cache](../README.md); the other half, the
-`containerd-image-preload` RPM, imports those tarballs into containerd. They
-share a directory and nothing else. See [DESIGN.md](DESIGN.md) for this
-module's model and [../DESIGN.md](../DESIGN.md) for the split between the two.
+It is one of the three pieces of [image-cache](../README.md). The
+`containerd-image-preload` RPM imports those tarballs into containerd, and
+`imagecachectl`, whose source lives in this module under
+[cmd/imagecachectl](cmd/imagecachectl), does one resource's worth of the fill
+from a command, for a node with no Kubernetes on it yet. They share a
+directory and nothing else. See [DESIGN.md](DESIGN.md) for this module's
+model and [../DESIGN.md](../DESIGN.md) for the split between them.
 
 All the commands below run from this directory.
 
@@ -119,10 +122,11 @@ on, so there is nothing to elect a leader for.
 ## Development
 
 ```console
-make test          # unit tests and the envtest suite
+make test          # unit tests and the envtest suite, imagecachectl included
 make test-e2e      # end-to-end tests on a kind cluster
 make lint          # golangci-lint, custom build with the logcheck plugin
 make run           # run the controller against your current kubeconfig
+make build-imagecachectl OUT=bin/imagecachectl   # the command
 make help          # everything else
 ```
 

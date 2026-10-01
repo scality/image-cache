@@ -1,6 +1,6 @@
 # Design
 
-This document covers the project as a whole: the problem, the split into two
+This document covers the project as a whole: the problem, the split into three
 components, and the on-disk contract between them. The agent's own design
 (its custom resource, its reconciliation model, its failure handling) lives in
 [agent/DESIGN.md](agent/DESIGN.md).
@@ -18,7 +18,7 @@ The fix is to keep a copy of the critical images on the node, outside
 containerd, in a form that can be restored without the network and without a
 working control plane.
 
-## Two components, one directory
+## Three components, one directory
 
 Restoring the cache and filling it are separate problems with separate
 lifetimes, so they are separate components:
@@ -37,8 +37,16 @@ lifetimes, so they are separate components:
   job, and keeping the two apart means the agent needs no privileged socket
   access.
 
+- **`imagecachectl`** (a command, in its own RPM) answers *fill* as well, but
+  once. A node being installed has no Kubernetes to run the agent in and needs
+  its images before the kubelet starts, so the same pull and the same
+  extraction are driven from a command. It reads a registry or a docker
+  archive, which is what a first node has instead of a registry. Once a
+  resource is complete it does nothing and reaches no registry: it reads the
+  marker the extraction left and checks the files it lists are still there.
+
 They communicate through the filesystem only, at `/var/lib/image-cache` by
-default. Neither knows the other exists, so either can be deployed alone:
+default. None of them knows the others exist, so each can be deployed alone:
 tarballs written by provisioning tooling get imported with no agent running,
 and a cluster that imports its cache some other way can still use the agent to
 maintain it.
@@ -78,10 +86,12 @@ image-cache is generic: it caches whatever images it is told to cache, for
 whatever consumer. It makes no assumption about the distribution running on
 the node beyond systemd, containerd, and Kubernetes for the agent.
 
-The architecture is the one exception. Both halves target `linux/amd64`: the
+The architecture is the one exception. Every part targets `linux/amd64`: the
 preload service imports with that platform by default, the agent image is
 built for it alone, and the DaemonSet carries a matching `nodeSelector` so it
-stays off nodes it could not run on. A node selected by an `ImageCache` but not
+stays off nodes it could not run on. The command's package is built for
+x86_64 alone, and the command refuses an archive that declares another
+platform. A node selected by an `ImageCache` but not
 by the agent never reports a label, so a mixed cluster needs a selector that
 says so.
 

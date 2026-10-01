@@ -15,16 +15,17 @@ breaks the circular dependency: the images live on the node as plain tarballs,
 and a systemd service imports them into containerd without asking anything of
 Kubernetes.
 
-The project is two independent halves that meet on a directory:
+The project is three pieces that meet on a directory:
 
 | Component | What it does |
 | --- | --- |
 | [`containerd-image-preload`](rpm/) (RPM) | A systemd service and timer that import every tarball of the cache directory into containerd. Runs on boot and every 10 minutes. Needs no Kubernetes, no registry, no network. |
 | [`image-cache-agent`](agent/) (DaemonSet) | A Kubernetes agent that fills the cache: it pulls the images declared by `ImageCache` custom resources, extracts the tarballs they carry into the cache directory, garbage-collects what is no longer declared, and reports per-node progress as node labels. |
+| [`imagecachectl`](agent/cmd/imagecachectl/) (command, RPM) | The same fill, once, for a node that has no Kubernetes yet. Reads a registry or a docker archive and writes the tarballs where the agent would have. |
 
 The contract between them is the filesystem, `/var/lib/image-cache` by
-default: the agent writes tarballs, the preload service imports them. Either
-half works without the other. A node provisioned with tarballs copied at
+default: the agent or the command writes tarballs, the preload service imports
+them. Each works without the others. A node provisioned with tarballs copied at
 install time gets them imported with no agent running, and the agent keeps a
 cache up to date on a cluster that imports it some other way.
 
@@ -134,6 +135,49 @@ deleting a resource removes. Two resources can select the same node, so an
 upgrade can stage new content next to the old one and drop the old one once
 every node is done.
 
+### The import command
+
+A node being installed has no Kubernetes to run the agent in, and its kubelet
+needs images before it starts. `imagecachectl` does the agent's work once, from
+a registry or from a docker archive, which is what a first node has instead of
+a registry.
+
+```console
+dnf install imagecachectl-<version>-1.el9.x86_64.rpm
+mkdir -p /var/lib/image-cache
+imagecachectl import --name worker-1-0-0 registry.example.com/my-boot-cache-worker:1.0.0
+imagecachectl import --name worker-1-0-0 /mnt/iso/images/my-boot-cache-worker.tar
+```
+
+Make the directory first: no package creates it, and on the node this runs on
+there is no agent yet to create it either.
+
+`--name` is the name of the `ImageCache` resource this content belongs to. It
+is the directory the tarballs land in, and it is how the agent recognises the
+resource later: give it the name the resource will carry and the agent adopts
+what the command wrote, instead of pulling the same image again and collecting
+the directory it did not recognise.
+
+The source is read as a path when it starts with a separator or a dot, or ends
+in `.tar`, and as an image reference otherwise. What decides is the shape of
+what you pass, never what happens to sit in the current directory, so an
+archive named something else has to be given as `./that-name`.
+
+A second run over a resource that is already complete writes nothing and
+reaches no registry, so the command is safe to call on every convergence
+rather than only at install. `--cache-path` overrides the directory; it has to
+be absolute, the same rule the `ImageCache` field follows.
+
+The import refuses to replace a directory it did not write, that is one
+without the agent's sentinel in it. The cache path is shared and the command
+runs as root, so a name that lands on a neighbouring directory stops rather
+than emptying it. Removing that directory by hand is how you say you meant it.
+
+One thing to get right the first time: nothing checks that what you imported
+under a name is what the resource of that name will ask for. Seed the wrong
+image and the agent adopts it, labels the node synced and never pulls the
+right one. Removing the directory by hand is the way back.
+
 ### Building a cache image
 
 A cache image is an ordinary container image whose layers carry the tarballs.
@@ -155,16 +199,24 @@ docker build --platform linux/amd64 -t registry.example.com/my-boot-cache-worker
 docker push registry.example.com/my-boot-cache-worker:1.0.0
 ```
 
-Three things the agent expects:
+Four things the agent expects:
 
 - **A `linux/amd64` image.** It resolves the reference for that platform and
-  no other, which is also why the build above pins it.
-- **Unique file names.** The image filesystem is flattened to base names, so
-  two files called `app.tar` sitting in different directories fail the
-  extraction instead of overwriting each other.
+  no other, which is also why the build above pins it. An archive read by
+  `imagecachectl` is checked the same way, so an image saved on an arm64
+  machine is refused instead of filling an x86_64 node's cache.
+- **Unique file names.** Every file lands flat, under its base name, so two
+  files called `app.tar`, in different directories or written by different
+  layers, fail the extraction instead of overwriting each other.
 - **`FROM scratch`, or something equally empty.** Every regular file of the
-  flattened image lands in the cache directory, so a conventional base image
-  would pour its whole filesystem in there.
+  image lands in the cache directory, so a conventional base image would pour
+  its whole filesystem in there. A layer that deletes a file of an earlier one
+  is refused.
+- **Regular files only.** A symbolic link, a hard link or a device in the
+  image refuses it whole, naming the entry. `docker build` copies a link as it
+  finds it, so an archive linked into the build context from elsewhere would
+  otherwise reach the node as a link to nothing, and the cache would look
+  complete without it. Directories are fine.
 
 The layout inside the image does not matter, since only base names survive.
 Files that do not end in `.tar` are extracted too, but the preload service
@@ -173,8 +225,8 @@ ignores them.
 ## Repository layout
 
 ```
-agent/   the image-cache-agent Go module (kubebuilder), its CRD and manifests
-rpm/     the containerd-image-preload package: sources, spec, build and tests
+agent/   the Go module (kubebuilder): the agent, imagecachectl, the CRD and manifests
+rpm/     the two packages: sources, specs, build and tests
 ```
 
 Each component is built and tested independently, and both CI workflows run on
@@ -182,8 +234,8 @@ every pull request, since a required check that never runs leaves the pull
 request waiting forever; on pushes to `main` they are scoped by path.
 
 Releases are not independent yet: a tag cuts one version for the repository,
-and the only artifact attached is the RPM for both EL versions. Publishing the
-agent image is still to come.
+and the artifacts attached are the two RPMs, for both EL versions. Publishing
+the agent image is still to come.
 
 ## Development
 
@@ -194,7 +246,7 @@ make -C agent test          # unit tests and the envtest suite
 make -C agent lint          # golangci-lint (custom build, plugins included)
 make -C agent test-e2e      # end-to-end tests on a kind cluster
 make -C rpm test EL=9       # shellcheck, bats and rpmlint, in a Rocky 9 container
-make -C rpm rpm EL=9        # build the RPM into rpm/_build/
+make -C rpm rpm EL=9        # build both RPMs into rpm/_build/
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and the conventions.

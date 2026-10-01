@@ -11,18 +11,19 @@ dismissive behaviour are not, and maintainers will moderate accordingly.
 
 ## Repository layout
 
-The repository holds two independent components, each with its own toolchain:
+The repository holds two toolchains, and three things built from them:
 
 - [`agent/`](agent): the `image-cache-agent` Go module (kubebuilder), its
   `ImageCache` CRD and its deployment manifests.
-- [`rpm/`](rpm): the `containerd-image-preload` package, with shell sources,
-  systemd units, spec file, build script and tests. Its
-  [README](rpm/README.md) covers the toolchain.
+- [`rpm/`](rpm): two packages. `containerd-image-preload`, with shell sources,
+  systemd units, spec, build script and tests; and `imagecachectl`, which wraps
+  a binary compiled from `agent/`. Its [README](rpm/README.md) covers the
+  toolchain.
 
 Keep a change inside one component when you can. Reviewers read the repository
 that way, and the toolchains have nothing in common. Releases do not follow
-that split yet: a tag cuts one version for the whole repository, and only the
-RPM is attached to it.
+that split yet: a tag cuts one version for the whole repository, and the RPMs
+are what is attached to it.
 
 ## Development environment
 
@@ -35,15 +36,17 @@ One version escapes the pinning. The `logcheck` plugin of the custom
 golangci-lint build resolves to `latest` in `agent/.custom-gcl.yml`, so a new
 `sigs.k8s.io/logtools` release can turn an unchanged tree red.
 
-The RPM side needs only Docker: builds and tests run inside a Rocky Linux
-container, pinned by digest, so the result does not depend on your host.
+The RPM side runs inside a Rocky Linux container pinned by digest, so the
+packaging does not depend on your host. Go is needed there too, since the
+`imagecachectl` package wraps a binary compiled outside the container: that
+image carries the packaging toolchain and no compiler.
 
 ```console
 make -C agent test          # unit tests and the envtest suite
 make -C agent lint          # golangci-lint (custom build with the logcheck plugin)
 make -C agent test-e2e      # end-to-end tests on a kind cluster
 make -C rpm test EL=9       # shellcheck, bats and rpmlint (EL=8 or EL=9)
-make -C rpm rpm EL=9        # build the RPM into rpm/_build/
+make -C rpm rpm EL=9        # build both RPMs into rpm/_build/
 ```
 
 `make -C agent help` lists the rest.

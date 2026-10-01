@@ -100,7 +100,7 @@ func (f *FSWatcher) closed(ctx context.Context) error {
 }
 
 // NeedLeaderElection implements manager.LeaderElectionRunnable. Leader
-// election is not enabled at all (see cmd/main.go), so this only states the
+// election is not enabled at all (see cmd/manager/main.go), so this only states the
 // intent for anyone who would turn it on: every agent watches the node it
 // runs on, and there is no leader among them.
 func (f *FSWatcher) NeedLeaderElection() bool { return false }

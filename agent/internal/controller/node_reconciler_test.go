@@ -64,9 +64,9 @@ const (
 
 // fakePuller is a mutable, race-safe puller.Puller: tests flip fail to
 // exercise the sync failure and self-heal paths without touching a
-// registry. On success it returns a forged image whose single layer file
-// is images/etcd.tar, mirroring what mutate.Extract would flatten out of a
-// real image.
+// registry. On success it returns a forged stream whose single entry is
+// images/etcd.tar, as a real puller passes on the entries of a one-layer
+// image.
 type fakePuller struct{ fail atomic.Bool }
 
 func (f *fakePuller) Pull(context.Context, string) (io.ReadCloser, string, error) {

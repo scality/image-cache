@@ -8,22 +8,27 @@ end. "What not to flag" closes the file.
 ## What this repo is
 
 `image-cache` keeps a local, self-healing cache of container images on a Kubernetes
-node, so the node can boot and recover without reaching a registry. Two halves that
-never call each other:
+node, so the node can boot and recover without reaching a registry. Parts that never
+call each other:
 
 - **`agent/`** — Go controller (kubebuilder, controller-runtime), shipped as a
   DaemonSet. Watches `ImageCache` custom resources, pulls the listed images and
   extracts them as tar archives into the node cache directory. Reports per-node
   progress through Node labels. Spec: `agent/DESIGN.md`.
-- **`rpm/`** — `containerd-image-preload` package: a shell script plus a systemd
-  service and timer that (re)import the cached archives into containerd. Runs with
-  no Kubernetes API, no network. Tests are bats.
+- **`agent/cmd/imagecachectl`**: the same pull and extraction as the agent, run
+  once from a command, for a node being installed with no Kubernetes on it yet.
+  Logic in `internal/cli`.
+- **`rpm/`**: two packages. `containerd-image-preload`: a shell script plus a
+  systemd service and timer that (re)import the cached archives into containerd,
+  with no Kubernetes API and no network. And `imagecachectl`, wrapping the binary
+  above. Tests are bats.
 - **`.github/workflows/`** — thin callers of the reusable workflows in
   `scality/workflows`.
 
-The two halves meet on **one contract: the cache directory layout** (per-resource
-subdirectory, archive names, completion sentinel). The agent writes, the package
-imports.
+They meet on **one contract: the cache directory layout** (per-resource
+subdirectory, archive names, completion sentinel). The agent and `imagecachectl`
+write it, through the same `internal/cache` package, and the preload package
+imports what they wrote.
 
 This code is generic and open-source: it knows about Kubernetes and containerd,
 never about a specific downstream distribution or product. Its docs are read by

@@ -115,11 +115,16 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+	go build -o bin/manager ./cmd/manager
+
+.PHONY: build-imagecachectl
+OUT ?= bin/imagecachectl
+build-imagecachectl: ## Build the imagecachectl binary into OUT (used by the RPM build).
+	go build -o $(OUT) ./cmd/imagecachectl
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+	go run ./cmd/manager
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.

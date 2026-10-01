@@ -21,6 +21,20 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// Limits the CRD enforces, exported so that anything writing a cache
+// directory outside the API server validates against the same numbers and
+// the same rules. The kubebuilder markers below are comments and cannot read
+// these, so a test asserts the generated CRD still matches them.
+const (
+	// ResourceNameMax is the longest name an ImageCache may carry. The name
+	// becomes a node label name, which Kubernetes caps at 63 characters.
+	ResourceNameMax = 63
+
+	// CachePathParent is refused anywhere in cachePath, as a plain substring
+	// and not a path segment, which is what the CEL rule does.
+	CachePathParent = ".."
+)
+
 // ImageCacheSpec defines the desired state of ImageCache.
 type ImageCacheSpec struct {
 	// nodeSelector selects the nodes this cache applies to, by exact

@@ -42,10 +42,15 @@ setup_file() {
     [[ "$flags" == *n* ]]
 }
 
+# The exit status alone is not the gate: rpmlint returns 0 with warnings, so
+# the summary line is what the name of this test refers to. The spec is linted
+# too, which CONTRIBUTING asks for and only the RPM was getting.
 @test "rpmlint reports no errors or warnings" {
     cd "${BATS_TEST_DIRNAME}/.."
-    run rpmlint -f rpmlintrc "$RPM"
+    run rpmlint -f rpmlintrc "${NAME}.spec" "$RPM"
+    echo "$output"
     [ "$status" -eq 0 ]
+    echo "$output" | grep -qE "0 errors, 0 warnings"
 }
 
 @test "installed script is executable" {

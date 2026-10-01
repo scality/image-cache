@@ -5,6 +5,7 @@ import (
 	"archive/tar"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +14,11 @@ import (
 	"github.com/scality/go-errors"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 )
+
+// DefaultPath is where the cache lives unless something says otherwise. The
+// CRD defaults to it, the RPM's sysconfig ships it, and both the agent and
+// the command read it from here so that a change has one place to happen.
+const DefaultPath = "/var/lib/image-cache"
 
 // sentinelName marks a directory as fully extracted and agent-owned.
 // It is written last; garbage collection only considers directories
@@ -85,16 +91,16 @@ func (s Store) State(cachePath, name string) (State, error) {
 }
 
 // Extract writes the regular files of the tar stream into the resource
-// directory, flattened to their base names, then the sentinel, then swaps
+// directory, flattened to their base names, skipping directories and refusing
+// the whole stream on any other kind of entry, then the sentinel, then swaps
 // the directory into place. The swap is remove-then-rename (a rename cannot
 // replace an existing directory), so a crash mid-swap can transiently leave
 // the resource Absent; the next pass redoes the extraction. Extract must not
 // be called concurrently for the same name. A failed extraction leaves either
 // the previous state or a hidden temporary directory that GC removes later.
 //
-// A cache image is hundreds of megabytes, so the write loop honours ctx: an
-// agent being drained stops between entries instead of writing out the rest of
-// the payload first.
+// Every read honours ctx, inside an entry too: an entry can be hundreds of
+// megabytes, and nothing else watches ctx when the source is a local archive.
 func (s Store) Extract(
 	ctx context.Context, cachePath, name, digest string, content io.Reader,
 ) (err error) {
@@ -111,27 +117,59 @@ func (s Store) Extract(
 	}()
 
 	var files []string
-	tr := tar.NewReader(content)
+	tr := tar.NewReader(ctxReader{ctx: ctx, r: content})
 	for {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}
 		hdr, rerr := tr.Next()
-		if errors.Is(rerr, io.EOF) {
+		// Identity, not errors.Is. archive/tar ends an archive with io.EOF
+		// itself, while a failure upstream can wrap one: a registry closing
+		// the connection before a layer comes back as Get "...": EOF. Taken
+		// for the end, it published whatever the earlier layers held as a
+		// complete resource, the rest silently missing.
+		if rerr == io.EOF { //nolint:errorlint // see above: only the unwrapped value means the end
 			break
 		}
 		if rerr != nil {
 			return errors.Wrap(ErrExtract, errors.CausedBy(rerr),
 				errors.WithDetail("reading the image filesystem"))
 		}
-		if hdr.Typeflag != tar.TypeReg {
+		switch hdr.Typeflag {
+		// A contiguous file is a regular file to every reader that does not
+		// special-case it, content included.
+		case tar.TypeReg, tar.TypeCont:
+		// A directory is only a container for the files below it, and those
+		// land flat. A global header describes the archive, not an entry in
+		// it: git archive writes one, and the reader hands it back as its own
+		// header.
+		case tar.TypeDir, tar.TypeXGlobalHeader:
 			continue
+		default:
+			// A link or a device is not written out, and dropping it without a
+			// word would publish a resource short of an archive the image was
+			// built to carry: the sentinel would call it complete, the node would be
+			// labelled synced, and the gap would show the day the kubelet needs
+			// that image with no registry to fall back on. docker build copies
+			// a symbolic link as it finds it, dangling if it pointed outside the
+			// build context, so the image is refused whole instead. A hard link
+			// could be recreated from its target, but a boot cache image has
+			// no use for one.
+			return errors.Wrap(ErrExtract,
+				errors.WithDetailf("%q is %s, not a regular file", hdr.Name, entryKind(hdr.Typeflag)))
 		}
 		// Base names only: an entry cannot escape the directory, whatever
 		// path the image carries. The sentinel name is ours, and is written
 		// below; an image shipping that name would just be overwritten, so
 		// skip it rather than pretend it was extracted.
 		base := filepath.Base(hdr.Name)
+		// A name that is empty or all dots has no file name to land under:
+		// opening it would hit the temporary directory or its parent, and the
+		// failure would read as a duplicate rather than as what it is.
+		if base == "." || base == ".." || base == string(filepath.Separator) {
+			return errors.Wrap(ErrExtract,
+				errors.WithDetailf("%q has no file name", hdr.Name))
+		}
 		if base == sentinelName {
 			continue
 		}
@@ -158,6 +196,15 @@ func (s Store) Extract(
 		files = append(files, base)
 	}
 
+	// An image with nothing in it is a mistake upstream, not an empty cache
+	// to publish: the sentinel would report the resource complete, the node
+	// would be labelled synced, and it would hold none of the archives the
+	// resource was meant to give it.
+	if len(files) == 0 {
+		return errors.Wrap(ErrExtract,
+			errors.WithDetail("the image carries no file to cache"))
+	}
+
 	data, err := json.Marshal(sentinel{Digest: digest, Files: files})
 	if err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
@@ -168,6 +215,9 @@ func (s Store) Extract(
 			errors.WithDetail("writing the sentinel"))
 	}
 	final := s.dir(cachePath, name)
+	if err = s.replaceable(final, name); err != nil {
+		return err
+	}
 	if err = os.RemoveAll(final); err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("clearing the previous directory"))
@@ -177,6 +227,77 @@ func (s Store) Extract(
 			errors.WithDetail("swapping the directory into place"))
 	}
 	return nil
+}
+
+// entryKind names a tar entry type the way an operator would read it.
+func entryKind(flag byte) string {
+	switch flag {
+	case tar.TypeSymlink:
+		return "a symbolic link"
+	case tar.TypeLink:
+		return "a hard link"
+	case tar.TypeChar, tar.TypeBlock:
+		return "a device"
+	case tar.TypeFifo:
+		return "a named pipe"
+	default:
+		return fmt.Sprintf("an entry of tar type %q", flag)
+	}
+}
+
+// replaceable reports whether the swap may remove what is already at final.
+// Only a directory bearing the sentinel may be, which is the same rule GC
+// applies: the cache path is shared, and a name is not a claim on whatever
+// happens to sit under it. Without this, a resource named after a neighbour
+// of the cache path, or a cache path one level too high, turns the swap into
+// an rm -rf of somebody else's data.
+func (s Store) replaceable(final, name string) error {
+	if _, err := os.Stat(final); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("looking at the directory to replace"),
+			errors.WithProperty("resource", name))
+	}
+	if _, err := os.Stat(filepath.Join(final, sentinelName)); err != nil {
+		return errors.Wrap(ErrExtract,
+			errors.WithDetail("what is already there was not written by this, "+
+				"so it is left alone: remove it by hand if it should go"),
+			errors.WithProperty("resource", name),
+			errors.WithProperty("directory", final))
+	}
+	return nil
+}
+
+// SweepTemporaries removes the hidden temporary directories a previous
+// extraction of this resource left behind, and returns their names. Extract
+// cleans up after itself when it returns an error, but not when the process
+// is killed outright, and a leftover is the size of the image being written.
+//
+// Scoped to one name because a run for another resource may be in flight:
+// GC, which the agent calls, is the one that sweeps them all.
+func (s Store) SweepTemporaries(cachePath, name string) ([]string, error) {
+	entries, err := os.ReadDir(cachePath)
+	if err != nil {
+		return nil, errors.Wrap(ErrGC, errors.CausedBy(err),
+			errors.WithDetail("listing the cache path"))
+	}
+	prefix := "." + name + ".tmp-"
+	var removed []string
+	var errs []error
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		if rerr := os.RemoveAll(filepath.Join(cachePath, e.Name())); rerr != nil {
+			errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(rerr),
+				errors.WithProperty("directory", e.Name())))
+			continue
+		}
+		removed = append(removed, e.Name())
+	}
+	return removed, utilerrors.NewAggregate(errs)
 }
 
 // GC removes agent-owned directories (sentinel-bearing, plus stale hidden
@@ -211,4 +332,17 @@ func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
 		removed = append(removed, e.Name())
 	}
 	return removed, utilerrors.NewAggregate(errs)
+}
+
+// ctxReader fails every read once ctx is done.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }

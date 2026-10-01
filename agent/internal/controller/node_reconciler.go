@@ -30,9 +30,8 @@ import (
 	"github.com/scality/image-cache/agent/internal/puller"
 )
 
-// defaultCachePath mirrors the CRD default; it is always scanned for garbage
-// even when no resource references it anymore.
-const defaultCachePath = "/var/lib/image-cache"
+// defaultCachePath is always scanned for garbage, see cache.DefaultPath.
+const defaultCachePath = cache.DefaultPath
 
 // NodeReconciler converges the local node: cache directories and sync-status
 // node labels follow the ImageCache resources selecting this node.

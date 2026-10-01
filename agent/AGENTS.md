@@ -22,7 +22,9 @@ cluster-scoped.
 
 ```
 api/v1alpha1/        the ImageCache types and the generated deepcopy
-cmd/main.go          flags, manager setup, what gets registered
+cmd/manager/         flags, manager setup, what gets registered
+cmd/imagecachectl/   the one-shot command, wiring only
+internal/cli/        what that command does: parse, guard, pull, extract
 internal/controller/ the node reconciler, the filesystem watcher, the labels
 internal/cache/      the on-disk store: state, extraction, garbage collection
 internal/puller/     pulling an image and streaming its layers
@@ -45,7 +47,7 @@ They come from the markers in the Go sources, so change the marker, run
 one; [../CONTRIBUTING.md](../CONTRIBUTING.md#agent-go) says why.
 
 Leave the `+kubebuilder:scaffold:*` comments alone. They are insertion points
-for the kubebuilder CLI, in `cmd/main.go`, `internal/controller/suite_test.go`
+for the kubebuilder CLI, in `cmd/manager/main.go`, `internal/controller/suite_test.go`
 and several kustomizations.
 
 ## Verifying a change
@@ -96,7 +98,7 @@ Do not scaffold them back in:
   certificates, a Service and an ordering problem at bootstrap.
 - **No status subresource.** The per-node result lives in Node labels, which is
   what makes it greppable and gateable from outside the cluster.
-- **No leader election.** `cmd/main.go` never enables it, so nothing is gated
+- **No leader election.** `cmd/manager/main.go` never enables it, so nothing is gated
   today. A runnable still declares `NeedLeaderElection() bool { return false }`,
   because controller-runtime defaults to `true` and would gate it the day
   someone turns leader election on. Every agent converges its own node, so

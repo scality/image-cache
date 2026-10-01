@@ -47,6 +47,22 @@ const imageCacheName = "imagecache-e2e-smoke"
 // imageCacheName. See api/v1alpha1.ImageCache's doc comment for the contract.
 const nodeLabelKey = "image-cache.scality.com/" + imageCacheName
 
+// seeded are what imagecachectl leaves on a node, written as root in mode
+// 0700: a directory with the store's sentinel, the temporary of an
+// interrupted extraction, and next to them a directory it did not write.
+var seeded = []string{
+	"/var/lib/image-cache/seeded-e2e",
+	"/var/lib/image-cache/.seeded-e2e.tmp-1",
+	"/var/lib/image-cache/foreign-e2e",
+}
+
+var seedScript = "set -e\n" +
+	"mkdir -p " + strings.Join(seeded, " ") + "\n" +
+	"chmod 0700 " + strings.Join(seeded, " ") + "\n" +
+	`echo '{"digest":"sha256:seeded","files":[],"owner":"imagecachectl"}' > ` +
+	seeded[0] + "/.image-cache-agent.json\n" +
+	"echo half > " + seeded[1] + "/half.tar\n"
+
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
@@ -75,6 +91,10 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
 
+		By("seeding the cache directory as root, as imagecachectl would")
+		_, err = utils.OnKindNode(seedScript)
+		Expect(err).NotTo(HaveOccurred(), "Failed to seed the cache directory")
+
 		By("deploying the controller-manager")
 		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
 		_, err = utils.Run(cmd)
@@ -84,6 +104,9 @@ var _ = Describe("Manager", Ordered, func() {
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
 	// and deleting the namespace.
 	AfterAll(func() {
+		By("removing the seeded directories")
+		_, _ = utils.OnKindNode("rm -rf " + strings.Join(seeded, " "))
+
 		By("deleting the smoke-test ImageCache, in case an earlier step left it behind")
 		cmd := exec.Command("kubectl", "delete", "imagecache", imageCacheName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
@@ -171,6 +194,19 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
 			controllerPodName = podNames[0]
 			Expect(controllerPodName).To(ContainSubstring("controller-manager"))
+		})
+
+		It("should hand the directories imagecachectl seeded to the agent, and nothing else", func() {
+			out, err := utils.OnKindNode("stat -c '%u %n' " + seeded[0] + " " + seeded[2])
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("65532 " + seeded[0] + "\n"))
+			Expect(out).To(ContainSubstring("0 " + seeded[2] + "\n"))
+
+			// The agent collects an interrupted extraction. It holds a file,
+			// so removing it takes write access to the temporary itself.
+			Eventually(func() (string, error) {
+				return utils.OnKindNode("test -e " + seeded[1] + " && echo present || echo gone")
+			}).Should(Equal("gone\n"))
 		})
 
 		// This is the smoke assertion for the label contract: watch, node

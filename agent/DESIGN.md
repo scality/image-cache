@@ -104,20 +104,26 @@ Per-resource subdirectories make name collisions between versions impossible
 and make garbage collection atomic: removing a resource's cache is removing
 one directory.
 
-The sentinel file is written after everything else and marks the directory as
-complete and agent-owned:
+The sentinel file is written after everything else. It marks the directory as
+complete and records who wrote it:
 
 - **Ownership**: garbage collection only ever considers directories containing
   a sentinel, plus the agent's own interrupted extractions (hidden, and holding
   `.tmp-`, see below). Flat tarballs (e.g. placed by provisioning at bootstrap)
-  and foreign directories in a shared cache path are never touched.
+  and foreign directories in a shared cache path are never touched. The
+  sentinel records its writer, and a directory `imagecachectl` wrote is left
+  alone until a resource adopts it (see the one-shot command below). A
+  sentinel that names no owner is foreign too. One that does not parse counts
+  as the agent's, since it is damaged.
 - **Completeness**: a directory without a sentinel is a partial extraction and
   is redone. The sentinel lists the expected file names, so a manually deleted
   tarball is detected and repaired.
-- **Traceability**: the sentinel records the resolved image digest.
+- **Traceability**: the sentinel records who wrote the directory, the source
+  it was read from, the manifest digest and the diff IDs of the image's
+  layers.
 
 The name is the agent's own: an entry carrying it inside a cache image is
-skipped, so the sentinel always describes what the agent extracted. Entries
+skipped, so the sentinel always describes what the store extracted. Entries
 are extracted by base name, so nothing in an image can write outside its
 directory. Directory entries are skipped, since everything lands flat, and any
 other kind of entry refuses the image whole. A symbolic link or a device is
@@ -136,8 +142,10 @@ A crash before the rename leaves a hidden `.<name>.tmp-*` directory next to
 the target; garbage collection removes it on a later pass, the same as an
 orphaned resource directory.
 
-A resource whose directory is complete is never re-pulled: `spec.source` is
-effectively immutable once synced. Publishing new content means creating a
+A resource whose directory is complete and written by the agent is never
+re-pulled: `spec.source` is effectively immutable once synced. A directory
+`imagecachectl` seeded is checked once against `spec.source` before the agent
+takes it over, see the one-shot command below. Publishing new content means creating a
 new ImageCache (the name carries the version), not editing an existing one.
 
 ## Reconciliation model
@@ -171,11 +179,14 @@ One pass:
 
 1. Compute `desired`: the ImageCache resources whose `nodeSelector` matches
    the labels of the node named by `NODE_NAME` (downward API).
-2. For each desired resource: if its directory is complete, done. Otherwise
-   set the label to `pending`, pull `spec.source` (linux/amd64), extract
-   atomically, then set the label to `synced`.
-3. Garbage-collect: in every scanned cache path, delete the sentinel-bearing
-   directories that no desired resource claims. The scan set is the default
+2. For each desired resource: if its directory is complete and the agent
+   wrote it, done. If `imagecachectl` wrote it, set the label to `pending` and
+   check that it holds the resource's image before adopting it (see the
+   one-shot command below). Otherwise set the label to `pending`, pull
+   `spec.source` (linux/amd64), extract atomically, then set the label to
+   `synced`.
+3. Garbage-collect: in every scanned cache path, delete the directories whose
+   sentinel names the agent and that no desired resource claims. The scan set is the default
    cache path plus every cache path an ImageCache references now or referenced
    earlier in this agent process's lifetime — a custom path stays in the set
    after its last resource is deleted, so its orphaned directory is still
@@ -243,14 +254,12 @@ Three consequences worth stating:
 
 - **The name is the caller's.** It becomes the resource directory, and the
   agent recognises a resource by it. Given the name the `ImageCache` will
-  carry, the agent finds the sentinel, reads it as complete, and pulls
-  nothing. Given any other name, garbage collection removes the directory,
-  since it bears the agent's sentinel and nothing claims it. That only holds
-  under a cache path the agent scans, which is the default one plus the paths
-  declared by resources: a directory imported under `--cache-path /srv/images`
-  is the caller's to clean up, because nothing points the agent at it. The
-  command validates the name as a DNS-1123 subdomain, the rule the API server
-  applies to the resource, so the two cannot disagree on what a name is.
+  carry, the agent finds the directory complete and adopts it once it has
+  checked the content (below). Given any other name, the directory stays:
+  garbage collection leaves what the command wrote, and no resource claims
+  it, so it is the caller's to remove. The command validates the name as a
+  DNS-1123 subdomain, the rule the API server applies to the resource, so the
+  two cannot disagree on what a name is.
 - **It replaces only what the store wrote.** The swap that publishes a
   resource removes whatever is at the destination first, so it refuses a
   directory that does not bear the sentinel. The cache path is shared, and a
@@ -262,6 +271,39 @@ Three consequences worth stating:
   registry, whatever the source now points at. Keeping a node up to date is
   the agent's job, and a command that ran again on every convergence would be
   a second, weaker one.
+
+### Adopting a seeded directory
+
+The sentinel names its writer, so the agent tells what the command seeded from
+what it wrote itself. Garbage collection leaves the command's directories
+alone: at install the agent can land before the resources that name them, and
+collecting a seeded cache would pull the same gigabyte again.
+
+A resource that claims a seeded directory keeps its node `pending` until the
+agent has checked the content. The agent resolves `spec.source`, which reads
+the manifest and the configuration and never a layer. It compares the diff
+IDs of the layers, in order, with the ones the command recorded:
+
+- the same image: the agent rewrites the owner in the sentinel, through a
+  temporary file renamed over it, and labels the node `synced` without
+  pulling. From then on the directory is the agent's, to refresh and to
+  collect.
+- another image: the directory is replaced like any other that does not hold
+  what its resource asks for.
+- the source cannot be resolved: the directory is left as it is, and the next
+  pass tries again.
+
+The diff IDs identify the content because the cache holds nothing else: the
+files come from the layers. They are the digests of the uncompressed layers,
+so they do not depend on how the image is stored. The other identities do:
+
+- the source string: the first node is seeded from an archive path and its
+  resource names a registry reference. The string also changes with the
+  registry endpoint.
+- the manifest digest: it changes when an image is saved or pushed.
+- the configuration digest: a format conversion, Docker to OCI for example,
+  writes the configuration out again in another key order. The content is
+  the same, the digest is not.
 
 ## Container image and deployment
 
@@ -284,8 +326,12 @@ Two deployment constraints follow from `cachePath` living on the host:
   declare.
 - **The host directory must be writable by UID 65532.** `fsGroup` does not
   apply to hostPath volumes. The sample manifest uses a root init container
-  that chowns the cache directory; integrators managing permissions at
-  provisioning time can drop it.
+  that chowns the cache directory. It also chowns what `imagecachectl`
+  seeded, since the command runs as root: the directories that hold a
+  sentinel and the hidden temporaries of an interrupted extraction. The agent
+  writes in them to adopt or replace them. It changes nothing else under the
+  shared path. Integrators managing permissions at provisioning time can drop
+  the init container, and then have to do the same.
 - **The namespace must enforce the `privileged` Pod Security Standard.**
   hostPath volumes are already disallowed at the `baseline` level, and the
   chown init container runs as root, so the agent's namespace needs

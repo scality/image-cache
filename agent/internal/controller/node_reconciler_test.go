@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,8 @@ import (
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 	"github.com/scality/image-cache/agent/internal/cache"
+	"github.com/scality/image-cache/agent/internal/cli"
+	"github.com/scality/image-cache/agent/internal/puller"
 )
 
 // Resource names, labels, and paths used by the tests added below.
@@ -66,19 +69,48 @@ const (
 // exercise the sync failure and self-heal paths without touching a
 // registry. On success it returns a forged stream whose single entry is
 // images/etcd.tar, as a real puller passes on the entries of a one-layer
-// image.
-type fakePuller struct{ fail atomic.Bool }
+// image. It counts the pulls of each source, for the cases that must not
+// pull at all.
+type fakePuller struct {
+	fail atomic.Bool
 
-func (f *fakePuller) Pull(context.Context, string) (io.ReadCloser, string, error) {
+	mu    sync.Mutex
+	pulls map[string]int
+}
+
+func (f *fakePuller) Pull(_ context.Context, ref string) (io.ReadCloser, puller.Image, error) {
+	f.mu.Lock()
+	if f.pulls == nil {
+		f.pulls = map[string]int{}
+	}
+	f.pulls[ref]++
+	f.mu.Unlock()
 	if f.fail.Load() {
-		return nil, "", errors.New("registry unreachable")
+		return nil, puller.Image{}, errors.New("registry unreachable")
 	}
 	buf := &bytes.Buffer{}
 	tw := tar.NewWriter(buf)
 	_ = tw.WriteHeader(&tar.Header{Name: "images/etcd.tar", Mode: 0o644, Size: 4})
 	_, _ = tw.Write([]byte("etcd"))
 	_ = tw.Close()
-	return io.NopCloser(buf), "sha256:fake", nil
+	return io.NopCloser(buf), fakeImage, nil
+}
+
+// fakeImage is what every source resolves to in these tests.
+var fakeImage = puller.Image{Digest: "sha256:fake", Layers: []string{"sha256:fakelayer"}}
+
+// pullsOf reports how many times ref was pulled.
+func (f *fakePuller) pullsOf(ref string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pulls[ref]
+}
+
+func (f *fakePuller) Resolve(context.Context, string) (puller.Image, error) {
+	if f.fail.Load() {
+		return puller.Image{}, errors.New("registry unreachable")
+	}
+	return fakeImage, nil
 }
 
 var _ = Describe("NodeReconciler", Ordered, func() {
@@ -351,6 +383,122 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 			}).Should(BeFalse())
 		}
 	})
+
+	// At install the agent can land before the resources that name what the
+	// command seeded. Its garbage collection runs on every pass, and has to
+	// leave a directory another writer owns until a resource claims it. A
+	// directory the agent wrote itself, with nothing claiming it, is the
+	// witness that the collection did run meanwhile.
+	It("leaves a directory the command seeded alone until a resource claims it", func() {
+		seeded := filepath.Join(cacheDir, "seeded-134-0-0")
+		orphan := filepath.Join(cacheDir, "orphan-134-0-0")
+		for dir, owner := range map[string]string{seeded: cli.Owner, orphan: cache.OwnerAgent} {
+			Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(dir, etcdTarName), []byte("etcd"), 0o644)).To(Succeed())
+			sentinel := `{"digest":"d","files":["` + etcdTarName + `"],"owner":"` + owner + `"}`
+			Expect(os.WriteFile(filepath.Join(dir, ".image-cache-agent.json"), []byte(sentinel), 0o644)).To(Succeed())
+		}
+
+		By("triggering a pass over the cache path with a resource that selects nothing here")
+		trigger := &imagecachev1alpha1.ImageCache{
+			ObjectMeta: metav1.ObjectMeta{Name: "trigger-134-0-0"},
+			Spec: imagecachev1alpha1.ImageCacheSpec{
+				NodeSelector: map[string]string{zoneLabelKey: "mars"},
+				Source:       "registry.example.com/boot-cache-other:134.0.0",
+				CachePath:    cacheDir,
+			},
+		}
+		Expect(k8sClient.Create(ctx, trigger)).To(Succeed())
+
+		By("waiting for the agent's own orphan to be collected")
+		Eventually(func() bool {
+			_, err := os.Stat(orphan)
+			return os.IsNotExist(err)
+		}).Should(BeTrue())
+
+		By("checking the seeded directory is still whole")
+		Consistently(func() ([]byte, error) {
+			return os.ReadFile(filepath.Join(seeded, etcdTarName))
+		}, "3s").Should(Equal([]byte("etcd")))
+
+		Expect(k8sClient.Delete(ctx, trigger)).To(Succeed())
+		Expect(os.RemoveAll(seeded)).To(Succeed())
+	})
+
+	// A resource that claims a directory the command seeded takes it over when
+	// it holds the resource's image, which the layers' diff IDs decide
+	// whatever the command read it from, and costs no pull.
+	It("adopts a seeded directory that holds the resource's image, without pulling", func() {
+		const name = "adopted-134-0-0"
+		source := "registry.example.com/boot-cache-adopted:134.0.0"
+		dir := seedDirectory(name, fakeImage.Layers[0])
+
+		ic := matchingResource(name, source)
+		Expect(k8sClient.Create(ctx, ic)).To(Succeed())
+
+		Eventually(func() (string, error) {
+			return nodeLabel(ctx, nodeKey, name)
+		}).Should(Equal(StatusSynced))
+		Expect(ownerOf(dir)).To(Equal(cache.OwnerAgent))
+		Expect(os.ReadFile(filepath.Join(dir, etcdTarName))).To(Equal([]byte(seededContent)))
+		Expect(testPuller.pullsOf(source)).To(BeZero())
+
+		Expect(k8sClient.Delete(ctx, ic)).To(Succeed())
+		Eventually(func() bool {
+			_, err := os.Stat(dir)
+			return os.IsNotExist(err)
+		}).Should(BeTrue(), "an adopted directory is the agent's to collect")
+	})
+
+	It("replaces a seeded directory that holds another image", func() {
+		const name = "reseeded-134-0-0"
+		source := "registry.example.com/boot-cache-reseeded:134.0.0"
+		dir := seedDirectory(name, "sha256:anotherlayer")
+
+		ic := matchingResource(name, source)
+		Expect(k8sClient.Create(ctx, ic)).To(Succeed())
+
+		Eventually(func() ([]byte, error) {
+			return os.ReadFile(filepath.Join(dir, etcdTarName))
+		}).Should(Equal([]byte("etcd")))
+		Eventually(func() (string, error) {
+			return nodeLabel(ctx, nodeKey, name)
+		}).Should(Equal(StatusSynced))
+		Expect(ownerOf(dir)).To(Equal(cache.OwnerAgent))
+		Expect(testPuller.pullsOf(source)).To(BeNumerically(">=", 1))
+
+		Expect(k8sClient.Delete(ctx, ic)).To(Succeed())
+	})
+
+	It("leaves a seeded directory untouched while its source cannot be resolved", func() {
+		const name = "unresolved-134-0-0"
+		source := "registry.example.com/boot-cache-unresolved:134.0.0"
+		dir := seedDirectory(name, fakeImage.Layers[0])
+		testPuller.fail.Store(true)
+		DeferCleanup(func() { testPuller.fail.Store(false) })
+
+		ic := matchingResource(name, source)
+		Expect(k8sClient.Create(ctx, ic)).To(Succeed())
+
+		Eventually(func() (string, error) {
+			return nodeLabel(ctx, nodeKey, name)
+		}).Should(Equal(StatusPending))
+		Consistently(func() ([]byte, error) {
+			return os.ReadFile(filepath.Join(dir, etcdTarName))
+		}, "2s").Should(Equal([]byte(seededContent)))
+		Expect(ownerOf(dir)).To(Equal(cli.Owner))
+		Expect(testPuller.pullsOf(source)).To(BeZero())
+
+		By("letting the registry answer again")
+		testPuller.fail.Store(false)
+		Eventually(func() (string, error) {
+			return nodeLabel(ctx, nodeKey, name)
+		}).Should(Equal(StatusSynced))
+		Expect(ownerOf(dir)).To(Equal(cache.OwnerAgent))
+		Expect(testPuller.pullsOf(source)).To(BeZero())
+
+		Expect(k8sClient.Delete(ctx, ic)).To(Succeed())
+	})
 })
 
 // Separate top-level container: it runs its own manager against a node that
@@ -533,6 +681,44 @@ var _ = Describe("filesystem repair", func() {
 		}, 10*time.Second).Should(Equal([]byte("etcd")))
 	})
 })
+
+// seededContent is what seedDirectory writes, distinct from what fakePuller
+// extracts, so a case can tell a kept directory from a replaced one.
+const seededContent = "seeded"
+
+// seedDirectory writes, under the suite's cache directory, what the command
+// leaves for the named resource: a complete directory it owns, holding the
+// image whose only layer has the diff ID layer.
+func seedDirectory(name, layer string) string {
+	GinkgoHelper()
+	dir := filepath.Join(cacheDir, name)
+	Expect(os.MkdirAll(dir, 0o755)).To(Succeed())
+	Expect(os.WriteFile(filepath.Join(dir, etcdTarName), []byte(seededContent), 0o644)).To(Succeed())
+	sentinel := `{"digest":"sha256:seeded","files":["` + etcdTarName + `"],"owner":"` + cli.Owner +
+		`","source":"/mnt/iso/boot-cache.tar","layers":["` + layer + `"]}`
+	Expect(os.WriteFile(filepath.Join(dir, ".image-cache-agent.json"), []byte(sentinel), 0o644)).To(Succeed())
+	return dir
+}
+
+// matchingResource is a resource that selects the suite's node.
+func matchingResource(name, source string) *imagecachev1alpha1.ImageCache {
+	return &imagecachev1alpha1.ImageCache{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: imagecachev1alpha1.ImageCacheSpec{
+			NodeSelector: map[string]string{osLabelKey: osLabelLinux},
+			Source:       source,
+			CachePath:    cacheDir,
+		},
+	}
+}
+
+// ownerOf reads who the sentinel of dir says wrote it.
+func ownerOf(dir string) string {
+	GinkgoHelper()
+	rec, err := cache.Store{}.ReadRecord(filepath.Dir(dir), filepath.Base(dir))
+	Expect(err).NotTo(HaveOccurred())
+	return rec.Owner
+}
 
 // nodeLabel returns the value of the image-cache.scality.com/<name> label
 // on the named node.

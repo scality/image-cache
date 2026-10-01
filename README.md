@@ -155,8 +155,9 @@ there is no agent yet to create it either.
 `--name` is the name of the `ImageCache` resource this content belongs to. It
 is the directory the tarballs land in, and it is how the agent recognises the
 resource later: give it the name the resource will carry and the agent adopts
-what the command wrote, instead of pulling the same image again and collecting
-the directory it did not recognise.
+what the command wrote instead of pulling the same image again. Until a
+resource claims it, the agent leaves the directory alone, so it does not
+matter whether the agent or the resources reach the node first.
 
 The source is read as a path when it starts with a separator or a dot, or ends
 in `.tar`, and as an image reference otherwise. What decides is the shape of
@@ -168,15 +169,17 @@ reaches no registry, so the command is safe to call on every convergence
 rather than only at install. `--cache-path` overrides the directory; it has to
 be absolute, the same rule the `ImageCache` field follows.
 
-The import refuses to replace a directory it did not write, that is one
-without the agent's sentinel in it. The cache path is shared and the command
-runs as root, so a name that lands on a neighbouring directory stops rather
-than emptying it. Removing that directory by hand is how you say you meant it.
+The import refuses to replace a directory without a sentinel. The cache path
+is shared and the command runs as root, so a name that lands on a neighbouring
+directory stops rather than emptying it. Remove that directory by hand if you
+meant it.
 
-One thing to get right the first time: nothing checks that what you imported
-under a name is what the resource of that name will ask for. Seed the wrong
-image and the agent adopts it, labels the node synced and never pulls the
-right one. Removing the directory by hand is the way back.
+Before it adopts a directory, the agent checks that it holds the image the
+resource asks for, by comparing layers. It reads no layer to do so. The same
+image is taken over without a pull, another image is replaced, and an
+unreachable source leaves the directory as it is. See
+[agent/DESIGN.md](agent/DESIGN.md#adopting-a-seeded-directory). A directory
+imported under a name no resource ever carries stays until you remove it.
 
 ### Building a cache image
 

@@ -6,7 +6,6 @@ package controller
 import (
 	"context"
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -27,6 +26,7 @@ import (
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 	"github.com/scality/image-cache/agent/internal/cache"
+	"github.com/scality/image-cache/agent/internal/fill"
 	"github.com/scality/image-cache/agent/internal/puller"
 )
 
@@ -90,6 +90,9 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 	// orchestration gating on the labels sees work in progress.
 	want := map[string]string{}
 	keep := map[string]map[string]bool{}
+	// Complete directories another writer seeded, pending until the second
+	// pass has checked they hold the image their resource names.
+	seeded := map[string]cache.Record{}
 	var errs []error
 	for _, ic := range desired {
 		path := cachePathOf(ic)
@@ -97,15 +100,23 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 			keep[path] = map[string]bool{}
 		}
 		keep[path][ic.Name] = true
+		want[ic.Name] = StatusPending
 		state, err := r.Store.State(path, ic.Name)
+		if err != nil {
+			errs = append(errs, errors.Wrap(err, errors.WithProperty("resource", ic.Name)))
+			continue
+		}
+		if state != cache.Complete {
+			continue
+		}
+		rec, err := r.Store.ReadRecord(path, ic.Name)
 		switch {
 		case err != nil:
 			errs = append(errs, errors.Wrap(err, errors.WithProperty("resource", ic.Name)))
-			want[ic.Name] = StatusPending
-		case state == cache.Complete:
-			want[ic.Name] = StatusSynced
+		case rec.Foreign():
+			seeded[ic.Name] = rec
 		default:
-			want[ic.Name] = StatusPending
+			want[ic.Name] = StatusSynced
 		}
 	}
 	if err := r.patchLabels(ctx, &node, want); err != nil {
@@ -115,6 +126,21 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 	for _, ic := range desired {
 		if want[ic.Name] == StatusSynced {
 			continue
+		}
+		if rec, ok := seeded[ic.Name]; ok {
+			adopted, err := r.adopt(ctx, ic, rec)
+			if err != nil {
+				r.Recorder.Eventf(ic, nil, corev1.EventTypeWarning, "AdoptFailed", "Adopt",
+					"checking the directory seeded for %s on node %s: %v", ic.Spec.Source, r.NodeName, err)
+				errs = append(errs, errors.Wrap(err, errors.WithProperty("resource", ic.Name)))
+				continue
+			}
+			if adopted {
+				want[ic.Name] = StatusSynced
+				continue
+			}
+			// It holds another image: replaced like any directory that does
+			// not hold what its resource asks for.
 		}
 		if err := r.sync(ctx, ic); err != nil {
 			r.Recorder.Eventf(ic, nil, corev1.EventTypeWarning, "SyncFailed", "Sync",
@@ -154,29 +180,46 @@ func cachePathOf(ic *imagecachev1alpha1.ImageCache) string {
 	return filepath.Clean(ic.Spec.CachePath)
 }
 
+// adopt takes over a directory another writer seeded when it holds the image
+// the resource names, and reports whether it did. It compares the layers'
+// diff IDs, see "Adopting a seeded directory" in agent/DESIGN.md. A different
+// image is not an error: the caller replaces the content. A source that
+// cannot be resolved is an error, and the directory is left as it is.
+func (r *NodeReconciler) adopt(ctx context.Context, ic *imagecachev1alpha1.ImageCache, rec cache.Record) (bool, error) {
+	log := logf.FromContext(ctx).WithValues("resource", ic.Name, "seededFrom", rec.Source)
+	id, err := r.Puller.Resolve(ctx, ic.Spec.Source)
+	if err != nil {
+		return false, errors.Wrap(ErrSync, errors.CausedBy(err),
+			errors.WithDetail("resolving the image a seeded directory is checked against"))
+	}
+	if len(rec.Layers) == 0 || !slices.Equal(rec.Layers, id.Layers) {
+		log.Info("Seeded cache directory holds another image, replacing it",
+			"recorded", rec.Layers, "wanted", id.Layers)
+		return false, nil
+	}
+	if err := r.Store.Adopt(cachePathOf(ic), ic.Name); err != nil {
+		return false, errors.Wrap(ErrSync, errors.CausedBy(err))
+	}
+	r.Recorder.Eventf(ic, nil, corev1.EventTypeNormal, "Adopted", "Adopt",
+		"adopted the cache directory of %s, seeded by %s, on node %s", ic.Name, rec.Owner, r.NodeName)
+	log.Info("Adopted a seeded cache directory", "owner", rec.Owner)
+	return true, nil
+}
+
 // sync pulls the resource's image and extracts it into its cache directory.
 // It refuses to run when the cache path itself is missing: that means the
 // host mount does not cover it, and extracting would write into the
 // container filesystem.
 func (r *NodeReconciler) sync(ctx context.Context, ic *imagecachev1alpha1.ImageCache) error {
 	path := cachePathOf(ic)
-	if _, err := os.Stat(path); err != nil {
+	if err := fill.CheckCachePath(path); err != nil {
 		r.Recorder.Eventf(ic, nil, corev1.EventTypeWarning, "CachePathUnavailable", "Sync",
-			"cache path %s does not exist on node %s (is it mounted?)", path, r.NodeName)
-		return errors.Wrap(ErrSync, errors.CausedBy(err),
-			errors.WithDetail("the cache path is missing: is it mounted?"),
-			errors.WithProperty("cachePath", path))
+			"cache path %s is not usable on node %s (is it mounted?)", path, r.NodeName)
+		return errors.Wrap(ErrSync, errors.CausedBy(err))
 	}
-	content, digest, err := r.Puller.Pull(ctx, ic.Spec.Source)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if cerr := content.Close(); cerr != nil {
-			logf.FromContext(ctx).Error(cerr, "closing image stream", "resource", ic.Name)
-		}
-	}()
-	return r.Store.Extract(ctx, path, ic.Name, digest, content)
+	return fill.Fill(ctx, r.Store, r.Puller, path, ic.Name, ic.Spec.Source, cache.OwnerAgent, func(cerr error) {
+		logf.FromContext(ctx).Error(cerr, "closing image stream", "resource", ic.Name)
+	})
 }
 
 // rememberPaths merges paths into the reconciler's lifetime set of known

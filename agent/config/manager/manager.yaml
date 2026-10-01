@@ -47,11 +47,28 @@ spec:
           operator: Exists
           effect: NoSchedule
       initContainers:
-        # hostPath ignores fsGroup: hand the cache directory to the agent UID.
-        # Integrators managing permissions at provisioning time can drop this.
+        # hostPath ignores fsGroup: hand the cache directory to the agent UID,
+        # with what imagecachectl seeded there as root. See agent/DESIGN.md,
+        # "Container image and deployment". Integrators managing permissions
+        # at provisioning time can drop this.
         - name: chown-cache
           image: busybox:1.37
-          command: ["sh", "-c", "chown 65532:65532 /var/lib/image-cache"]
+          command:
+            - sh
+            - -c
+            - |
+              cache=/var/lib/image-cache
+              chown 65532:65532 "$cache" || exit 1
+              for d in "$cache"/*/; do
+                [ -L "${d%/}" ] && continue
+                [ -f "$d.image-cache-agent.json" ] || continue
+                chown 65532:65532 "$d" || exit 1
+              done
+              for d in "$cache"/.*.tmp-*/; do
+                [ -L "${d%/}" ] && continue
+                [ -d "$d" ] || continue
+                chown 65532:65532 "$d" || exit 1
+              done
           securityContext:
             runAsUser: 0
             runAsNonRoot: false

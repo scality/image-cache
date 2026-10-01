@@ -4,12 +4,14 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -591,5 +593,55 @@ func TestImportFailsWhenALayerCannotBeFetched(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(cacheDir); err != nil || len(entries) != 0 {
 		t.Errorf("the failed import left %v behind (%v)", entries, err)
+	}
+}
+
+type recorded struct {
+	Owner  string   `json:"owner"`
+	Source string   `json:"source"`
+	Layers []string `json:"layers"`
+}
+
+func readSentinel(t *testing.T, cacheDir string) recorded {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(cacheDir, resourceName, sentinelName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r recorded
+	if err := json.Unmarshal(data, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// The sentinel names the command, the source and the layers. The archive and
+// the registry record the same layers for the same image.
+func TestImportRecordsTheSameImageWhateverTheSource(t *testing.T) {
+	files := map[string][]byte{etcdTarPath: []byte("etcd")}
+	archivePath := archive(t, files)
+	registryRef := served(t, files)
+
+	sources := []string{archivePath, registryRef}
+	layers := make([][]string, 0, len(sources))
+	for _, src := range sources {
+		cacheDir := t.TempDir()
+		if code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, src); code != 0 {
+			t.Fatalf("%s: exit = %d (%s)", src, code, errOut)
+		}
+		r := readSentinel(t, cacheDir)
+		if r.Owner != Owner {
+			t.Errorf("%s: owner = %q, want %q", src, r.Owner, Owner)
+		}
+		if r.Source != src {
+			t.Errorf("source = %q, want %q", r.Source, src)
+		}
+		if len(r.Layers) != 1 || !strings.HasPrefix(r.Layers[0], "sha256:") {
+			t.Errorf("%s: layers = %q, want the image's one diff ID", src, r.Layers)
+		}
+		layers = append(layers, r.Layers)
+	}
+	if !slices.Equal(layers[0], layers[1]) {
+		t.Errorf("the archive recorded %v and the registry %v for the same image", layers[0], layers[1])
 	}
 }

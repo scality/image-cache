@@ -964,7 +964,7 @@ func TestRemotePullRejectsARegistrySignedByAnUnknownCA(t *testing.T) {
 func TestRemotePullTrustsTheGivenCA(t *testing.T) {
 	ref, caFile, base := tlsRegistry(t)
 
-	r, err := newRemote(caFile, base)
+	r, err := newRemote(TLS{CAFile: caFile}, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -991,7 +991,7 @@ func TestTheGivenCAExtendsTheSystemPool(t *testing.T) {
 		t.Skipf("no system pool here: %v", err)
 	}
 
-	r, err := newRemote(caFile, base)
+	r, err := newRemote(TLS{CAFile: caFile}, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1008,7 +1008,7 @@ func TestTheGivenCAExtendsTheSystemPool(t *testing.T) {
 }
 
 func TestNewRemoteWithoutCAKeepsTheDefaultTransport(t *testing.T) {
-	r, err := NewRemote("")
+	r, err := NewRemote(TLS{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1028,7 +1028,7 @@ func TestNewRemoteRefusesAnUnusableCAFile(t *testing.T) {
 		"not PEM": notPEM,
 	} {
 		t.Run(label, func(t *testing.T) {
-			_, err := NewRemote(path)
+			_, err := NewRemote(TLS{CAFile: path})
 			if !errors.Is(err, ErrCA) {
 				t.Fatalf("err = %v, want ErrCA", err)
 			}
@@ -1036,5 +1036,32 @@ func TestNewRemoteRefusesAnUnusableCAFile(t *testing.T) {
 				t.Errorf("err = %v, does not name %s", err, path)
 			}
 		})
+	}
+}
+
+func TestRemotePullSkipsVerificationWhenAsked(t *testing.T) {
+	ref, _, base := tlsRegistry(t)
+
+	r, err := newRemote(TLS{SkipVerify: true}, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, _, err := r.Pull(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Errorf("closing stream: %v", err)
+	}
+}
+
+// Trusting a CA and accepting any certificate contradict each other, so
+// neither one silently wins.
+func TestNewRemoteRefusesACAWithSkipVerify(t *testing.T) {
+	_, caFile, _ := tlsRegistry(t)
+
+	_, err := NewRemote(TLS{CAFile: caFile, SkipVerify: true})
+	if !errors.Is(err, ErrTLS) {
+		t.Fatalf("err = %v, want ErrTLS", err)
 	}
 }

@@ -125,6 +125,10 @@ namespace. The file is read once at startup, and an unusable one stops the
 agent there, so restart the DaemonSet after rotating the CA. Without it the
 pull fails on `x509: certificate signed by unknown authority`.
 
+On a test cluster set up by hand, `--insecure-skip-tls-verify` accepts any
+registry certificate instead. The agent logs a warning at startup. It excludes
+`--ca-file`, and no manifest here sets it: never use it on a real node.
+
 Leader election is deliberately absent. Every agent converges the node it runs
 on, so there is nothing to elect a leader for.
 

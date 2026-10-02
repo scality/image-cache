@@ -29,6 +29,8 @@ var (
 	// ErrCA covers a registry CA file that cannot be read or holds no
 	// certificate.
 	ErrCA = errors.New("unusable registry CA")
+	// ErrTLS covers TLS settings that contradict each other.
+	ErrTLS = errors.New("conflicting registry TLS settings")
 )
 
 // Puller resolves an image reference and returns the entries of its layers.
@@ -41,30 +43,58 @@ type Puller interface {
 }
 
 // Remote pulls linux/amd64 images from an OCI registry. The zero value
-// trusts the system CAs only; NewRemote adds a private one.
+// trusts the system CAs only.
 type Remote struct {
 	// transport is nil for go-containerregistry's default.
 	transport http.RoundTripper
 }
 
-// NewRemote returns a Remote that also trusts the certificates of the PEM
-// file at caFile, on top of the system ones, so that a registry behind a
-// public certificate stays reachable. An empty caFile trusts the system CAs
-// only. The file is read once: a rotated CA needs a new Remote.
-func NewRemote(caFile string) (Remote, error) {
-	if caFile == "" {
+// TLS says how a Remote checks the registry certificate.
+type TLS struct {
+	// CAFile is a PEM file of CAs trusted on top of the system ones.
+	CAFile string
+	// SkipVerify accepts any certificate. It is meant for a test cluster set
+	// up by hand, never for a node.
+	SkipVerify bool
+}
+
+// NewRemote returns a Remote that checks certificates as cfg says. The CA
+// file is read once: a rotated CA needs a new Remote.
+func NewRemote(cfg TLS) (Remote, error) {
+	if cfg == (TLS{}) {
 		return Remote{}, nil
 	}
 	// The library declares its default as an *http.Transport.
-	return newRemote(caFile, remote.DefaultTransport.(*http.Transport))
+	return newRemote(cfg, remote.DefaultTransport.(*http.Transport))
 }
 
-// newRemote extends base with the CA; tests hand it a transport that dials
-// their own server.
-func newRemote(caFile string, base *http.Transport) (Remote, error) {
-	bundle, err := os.ReadFile(caFile)
+// newRemote builds on base; tests hand it a transport that dials their own
+// server.
+func newRemote(cfg TLS, base *http.Transport) (Remote, error) {
+	t := base.Clone()
+	switch {
+	case cfg.CAFile != "" && cfg.SkipVerify:
+		return Remote{}, errors.Wrap(ErrTLS,
+			errors.WithDetail("a CA file is pointless when certificates are not verified"))
+	case cfg.SkipVerify:
+		t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
+	default:
+		pool, err := caPool(cfg.CAFile)
+		if err != nil {
+			return Remote{}, err
+		}
+		t.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	}
+	return Remote{transport: t}, nil
+}
+
+// caPool returns the system CAs plus those of the PEM file at path. The given
+// CA extends the pool rather than replacing it, so a registry behind a public
+// certificate stays reachable.
+func caPool(path string) (*x509.CertPool, error) {
+	bundle, err := os.ReadFile(path)
 	if err != nil {
-		return Remote{}, errors.Wrap(ErrCA, errors.CausedBy(err), errors.WithProperty("path", caFile))
+		return nil, errors.Wrap(ErrCA, errors.CausedBy(err), errors.WithProperty("path", path))
 	}
 	// A pool that cannot be loaded is a host without system CAs, which is
 	// what the distroless image would be without its bundle: start empty
@@ -74,12 +104,10 @@ func newRemote(caFile string, base *http.Transport) (Remote, error) {
 		pool = x509.NewCertPool()
 	}
 	if !pool.AppendCertsFromPEM(bundle) {
-		return Remote{}, errors.Wrap(ErrCA, errors.WithDetail("no PEM certificate in the file"),
-			errors.WithProperty("path", caFile))
+		return nil, errors.Wrap(ErrCA, errors.WithDetail("no PEM certificate in the file"),
+			errors.WithProperty("path", path))
 	}
-	t := base.Clone()
-	t.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-	return Remote{transport: t}, nil
+	return pool, nil
 }
 
 var platform = v1.Platform{OS: "linux", Architecture: "amd64"}

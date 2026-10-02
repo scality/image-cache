@@ -226,6 +226,8 @@ Pulling and extraction use
   registry behind a public certificate stays reachable next to one signed by
   a private CA. The bundle is loaded once, when the puller is built, and an
   unusable one stops the agent at startup rather than failing every pull.
+  `--insecure-skip-tls-verify` turns verification off for test clusters. It
+  excludes `--ca-file`, so neither setting wins in silence.
 
 The cache images are regular container images (they must remain importable
 and mountable with `ctr` by provisioning tooling), so an artifact-oriented

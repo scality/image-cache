@@ -52,8 +52,9 @@ const importExample = `  imagecachectl import --name worker-1-0-0 registry.examp
 // success, ExitInterrupted when the context was cancelled, 1 otherwise.
 func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	var name, cachePath, caFile string
+	var skipVerify bool
 	importCmd := &cobra.Command{
-		Use:     "import --name <resource> [--cache-path <dir>] [--ca-file <file>] <source>",
+		Use:     "import --name <resource> [--cache-path <dir>] [--ca-file <file> | --insecure-skip-tls-verify] <source>",
 		Short:   "Fill the image cache from a registry or a docker archive",
 		Long:    importLong,
 		Example: importExample,
@@ -67,7 +68,13 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 			if err := validate(name, cachePath); err != nil {
 				return err
 			}
-			err := do(cmd.Context(), cachePath, name, args[0], caFile, out, errOut)
+			// On the values and not with MarkFlagsMutuallyExclusive, which
+			// would also refuse --insecure-skip-tls-verify=false.
+			if caFile != "" && skipVerify {
+				return errors.New("--ca-file and --insecure-skip-tls-verify exclude each other")
+			}
+			err := do(cmd.Context(), cachePath, name, args[0],
+				puller.TLS{CAFile: caFile, SkipVerify: skipVerify}, out, errOut)
 			// An interrupted run is not a failure to diagnose: the extraction
 			// publishes by rename, so nothing half written is left behind.
 			if errors.Is(err, context.Canceled) {
@@ -81,6 +88,8 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	importCmd.Flags().StringVar(&cachePath, "cache-path", cache.DefaultPath, "`directory` the archives are extracted under")
 	importCmd.Flags().StringVar(&caFile, "ca-file", "",
 		"PEM `file` of CA certificates to trust for the registry, on top of the system ones")
+	importCmd.Flags().BoolVar(&skipVerify, "insecure-skip-tls-verify", false,
+		"accept any registry certificate, for a test cluster set up by hand only")
 	_ = importCmd.MarkFlagRequired("name")
 
 	root := &cobra.Command{
@@ -127,15 +136,18 @@ func validate(name, cachePath string) error {
 	return nil
 }
 
-func do(ctx context.Context, cachePath, name, source, caFile string, out, errOut io.Writer) error {
+func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out, errOut io.Writer) error {
 	store := cache.Store{}
 
 	// Before the cache state, so that a CA that cannot be used is reported
 	// on every run, including one that would have found the resource
 	// complete, rather than only on the run that finally needs the registry.
-	src, err := pullerFor(source, caFile)
+	src, err := pullerFor(source, tls)
 	if err != nil {
 		return err
+	}
+	if _, remote := src.(puller.Remote); remote && tls.SkipVerify {
+		printf(errOut, "imagecachectl: warning: the registry certificate is not verified\n")
 	}
 
 	// Checked before anything reads through it, so that an unusable path is
@@ -217,14 +229,14 @@ func do(ctx context.Context, cachePath, name, source, caFile string, out, errOut
 // not own. Shape alone also means a path that is not there fails naming the
 // file rather than coming back with a complaint about a reference.
 //
-// The CA only matters to a registry, so an archive never reads it.
-func pullerFor(source, caFile string) (puller.Puller, error) {
+// The TLS settings only matter to a registry, so an archive never reads them.
+func pullerFor(source string, tls puller.TLS) (puller.Puller, error) {
 	switch {
 	case strings.HasPrefix(source, string(os.PathSeparator)),
 		strings.HasPrefix(source, "."),
 		strings.HasSuffix(source, ".tar"):
 		return puller.Tarball{}, nil
 	default:
-		return puller.NewRemote(caFile)
+		return puller.NewRemote(tls)
 	}
 }

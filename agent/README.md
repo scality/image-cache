@@ -135,6 +135,10 @@ On a test cluster set up by hand, `--insecure-skip-tls-verify` accepts any
 registry certificate instead. The agent logs a warning at startup. It excludes
 `--ca-file`, and no manifest here sets it: never use it on a real node.
 
+A registry that serves plain HTTP needs `--plain-http`. The agent logs a
+warning at startup. It excludes `--ca-file` and `--insecure-skip-tls-verify`,
+and no manifest here sets it.
+
 Leader election is deliberately absent. Every agent converges the node it runs
 on, so there is nothing to elect a leader for.
 

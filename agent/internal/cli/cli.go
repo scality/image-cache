@@ -52,9 +52,9 @@ const importExample = `  imagecachectl import --name worker-1-0-0 registry.examp
 // success, ExitInterrupted when the context was cancelled, 1 otherwise.
 func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	var name, cachePath, caFile string
-	var skipVerify bool
+	var skipVerify, plainHTTP bool
 	importCmd := &cobra.Command{
-		Use:     "import --name <resource> [--cache-path <dir>] [--ca-file <file> | --insecure-skip-tls-verify] <source>",
+		Use:     "import --name <resource> [--cache-path <dir>] [--ca-file <file> | --insecure-skip-tls-verify | --plain-http] <source>",
 		Short:   "Fill the image cache from a registry or a docker archive",
 		Long:    importLong,
 		Example: importExample,
@@ -73,8 +73,14 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 			if caFile != "" && skipVerify {
 				return errors.New("--ca-file and --insecure-skip-tls-verify exclude each other")
 			}
+			if plainHTTP && caFile != "" {
+				return errors.New("--ca-file and --plain-http exclude each other")
+			}
+			if plainHTTP && skipVerify {
+				return errors.New("--insecure-skip-tls-verify and --plain-http exclude each other")
+			}
 			err := do(cmd.Context(), cachePath, name, args[0],
-				puller.TLS{CAFile: caFile, SkipVerify: skipVerify}, out, errOut)
+				puller.TLS{CAFile: caFile, SkipVerify: skipVerify, PlainHTTP: plainHTTP}, out, errOut)
 			// An interrupted run is not a failure to diagnose: the extraction
 			// publishes by rename, so nothing half written is left behind.
 			if errors.Is(err, context.Canceled) {
@@ -90,6 +96,8 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 		"PEM `file` of CA certificates to trust for the registry, on top of the system ones")
 	importCmd.Flags().BoolVar(&skipVerify, "insecure-skip-tls-verify", false,
 		"accept any registry certificate, for a test cluster set up by hand only")
+	importCmd.Flags().BoolVar(&plainHTTP, "plain-http", false,
+		"allow plain HTTP to the registry, for a registry without TLS")
 	_ = importCmd.MarkFlagRequired("name")
 
 	root := &cobra.Command{
@@ -147,8 +155,13 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out
 	if err != nil {
 		return err
 	}
-	if _, remote := src.(puller.Remote); remote && tls.SkipVerify {
-		printf(errOut, "imagecachectl: warning: the registry certificate is not verified\n")
+	if _, remote := src.(puller.Remote); remote {
+		if tls.SkipVerify {
+			printf(errOut, "imagecachectl: warning: the registry certificate is not verified\n")
+		}
+		if tls.PlainHTTP {
+			printf(errOut, "imagecachectl: warning: the registry may be reached over plain HTTP\n")
+		}
 	}
 
 	// Checked before anything reads through it, so that an unusable path is
@@ -202,7 +215,8 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out
 // not own. Shape alone also means a path that is not there fails naming the
 // file rather than coming back with a complaint about a reference.
 //
-// The TLS settings only matter to a registry, so an archive never reads them.
+// The TLS and plain HTTP settings only matter to a registry, so an archive
+// never reads them.
 func pullerFor(source string, tls puller.TLS) (puller.Puller, error) {
 	switch {
 	case strings.HasPrefix(source, string(os.PathSeparator)),

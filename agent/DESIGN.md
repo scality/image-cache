@@ -246,6 +246,15 @@ Pulling and extraction use
   unusable one stops the agent at startup rather than failing every pull.
   `--insecure-skip-tls-verify` turns verification off for test clusters. It
   excludes `--ca-file`, so neither setting wins in silence.
+- On its own, the library falls back to plain HTTP only for a loopback or a
+  private address.
+  `--plain-http` marks every registry insecure (`name.Insecure`). The client
+  then tries HTTPS first, and also HTTP when HTTPS fails or takes more than
+  300ms: the first answer wins, on every pull. So the flag also weakens a
+  registry that serves HTTPS: a certificate error no longer fails the pull,
+  and anyone on the path can answer the HTTP attempt (port 80 when the
+  reference names no port). It is for a registry without TLS, and excludes
+  both certificate flags rather than mixing the two modes.
 
 The cache images are regular container images (they must remain importable
 and mountable with `ctr` by provisioning tooling), so an artifact-oriented

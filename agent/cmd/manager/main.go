@@ -65,6 +65,8 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var resyncPeriod time.Duration
+	var caFile string
+	var skipVerify bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -86,6 +88,11 @@ func main() {
 			"backoff, so this only bounds how long a drift that raised no event at all "+
 			"can last. Zero turns the periodic pass off entirely, leaving the agent "+
 			"purely event driven.")
+	flag.StringVar(&caFile, "ca-file", "",
+		"A PEM file of CA certificates to trust for registries, on top of the system ones. "+
+			"Read once at startup: restart the agent after rotating it.")
+	flag.BoolVar(&skipVerify, "insecure-skip-tls-verify", false,
+		"Accept any registry certificate. For a test cluster set up by hand only.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -184,6 +191,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Checked before anything starts: an unusable CA would otherwise surface
+	// as a failed pull on every node and every resource.
+	remote, err := puller.NewRemote(puller.TLS{CAFile: caFile, SkipVerify: skipVerify})
+	if err != nil {
+		setupLog.Error(err, "unable to set up registry TLS")
+		os.Exit(1)
+	}
+	if skipVerify {
+		setupLog.Info("WARNING: registry certificates are not verified (--insecure-skip-tls-verify)")
+	}
+
 	fw, err := controller.NewFSWatcher(nodeName)
 	if err != nil {
 		setupLog.Error(err, "unable to create filesystem watcher")
@@ -205,7 +223,7 @@ func main() {
 		Client:   mgr.GetClient(),
 		Recorder: mgr.GetEventRecorder("image-cache-agent"),
 		NodeName: nodeName,
-		Puller:   puller.Remote{},
+		Puller:   remote,
 		FS:       fw,
 		Resync:   resyncPeriod,
 	}).SetupWithManager(mgr); err != nil {

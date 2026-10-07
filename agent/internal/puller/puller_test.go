@@ -6,9 +6,12 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -902,5 +905,178 @@ func TestEntriesEndsWhenTheConsumerCloses(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the producer is still running five seconds after the consumer closed the stream")
+	}
+}
+
+// tlsRegistry serves an in-memory registry over TLS, signed by the test
+// server's own CA, and returns a reference to an image pushed there, the PEM
+// file of that CA, and a transport that reaches the server.
+//
+// The reference names example.com, which the test certificate covers, and
+// not the loopback address: go-containerregistry talks plain HTTP to a
+// loopback registry whatever it answers, so a test on 127.0.0.1 would never
+// verify a certificate. The transport dials the server for any address.
+func tlsRegistry(t *testing.T) (ref, caFile string, base *http.Transport) {
+	t.Helper()
+	srv := httptest.NewTLSServer(registry.New())
+	t.Cleanup(srv.Close)
+
+	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := strings.TrimPrefix(srv.URL, "https://")
+	if err := crane.Push(img, host+workerRefPath, crane.WithTransport(srv.Client().Transport)); err != nil {
+		t.Fatal(err)
+	}
+
+	caFile = filepath.Join(t.TempDir(), "ca.crt")
+	block := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	if err := os.WriteFile(caFile, block, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	base = remote.DefaultTransport.(*http.Transport).Clone()
+	// Straight to the server: a proxy from the environment would get the
+	// CONNECT through the dialer below and break the handshake.
+	base.Proxy = nil
+	dialer := &net.Dialer{}
+	base.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return dialer.DialContext(ctx, network, host)
+	}
+	_, port, _ := net.SplitHostPort(host)
+	return "example.com:" + port + workerRefPath, caFile, base
+}
+
+func TestRemotePullRejectsARegistrySignedByAnUnknownCA(t *testing.T) {
+	ref, _, base := tlsRegistry(t)
+
+	_, _, err := Remote{transport: base}.Pull(context.Background(), ref)
+	if !errors.Is(err, ErrPull) {
+		t.Fatalf("err = %v, want ErrPull", err)
+	}
+	var unknown x509.UnknownAuthorityError
+	if !errors.As(err, &unknown) {
+		t.Errorf("err = %v, want an unknown authority", err)
+	}
+}
+
+func TestRemotePullTrustsTheGivenCA(t *testing.T) {
+	ref, caFile, base := tlsRegistry(t)
+
+	r, err := newRemote(TLS{CAFile: caFile}, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, _, err := r.Pull(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := rc.Close(); err != nil {
+			t.Errorf("closing stream: %v", err)
+		}
+	}()
+	if _, err := io.Copy(io.Discard, rc); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The given CA extends the system pool rather than replacing it: a registry
+// behind a public certificate must stay reachable once a private CA is set.
+func TestTheGivenCAExtendsTheSystemPool(t *testing.T) {
+	_, caFile, base := tlsRegistry(t)
+	system, err := x509.SystemCertPool()
+	if err != nil {
+		t.Skipf("no system pool here: %v", err)
+	}
+
+	r, err := newRemote(TLS{CAFile: caFile}, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := r.transport.(*http.Transport).TLSClientConfig.RootCAs
+	if pool.Equal(system) {
+		t.Error("the pool does not carry the given CA")
+	}
+	// Subjects misses the system roots on some platforms, not on Linux,
+	// the only one the agent is built for.
+	//nolint:staticcheck // see above
+	if got, want := len(pool.Subjects()), len(system.Subjects())+1; got != want {
+		t.Errorf("pool holds %d certificates, want %d", got, want)
+	}
+}
+
+func TestNewRemoteWithoutCAKeepsTheDefaultTransport(t *testing.T) {
+	r, err := NewRemote(TLS{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.transport != nil {
+		t.Errorf("transport = %v, want the library default", r.transport)
+	}
+}
+
+// The library default is a package global: a zero Remote uses it, so a TLS
+// setting written on it would apply there too.
+func TestNewRemoteLeavesTheLibraryDefaultAlone(t *testing.T) {
+	def := remote.DefaultTransport.(*http.Transport)
+	before := def.TLSClientConfig
+	t.Cleanup(func() { def.TLSClientConfig = before })
+
+	if _, err := NewRemote(TLS{SkipVerify: true}); err != nil {
+		t.Fatal(err)
+	}
+	if def.TLSClientConfig != before {
+		t.Errorf("remote.DefaultTransport TLS config = %+v, want it unchanged", def.TLSClientConfig)
+	}
+}
+
+func TestNewRemoteRefusesAnUnusableCAFile(t *testing.T) {
+	dir := t.TempDir()
+	notPEM := filepath.Join(dir, "ca.crt")
+	if err := os.WriteFile(notPEM, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for label, path := range map[string]string{
+		"missing": filepath.Join(dir, "absent.crt"),
+		"not PEM": notPEM,
+	} {
+		t.Run(label, func(t *testing.T) {
+			_, err := NewRemote(TLS{CAFile: path})
+			if !errors.Is(err, ErrCA) {
+				t.Fatalf("err = %v, want ErrCA", err)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Errorf("err = %v, does not name %s", err, path)
+			}
+		})
+	}
+}
+
+func TestRemotePullSkipsVerificationWhenAsked(t *testing.T) {
+	ref, _, base := tlsRegistry(t)
+
+	r, err := newRemote(TLS{SkipVerify: true}, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, _, err := r.Pull(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Errorf("closing stream: %v", err)
+	}
+}
+
+// Trusting a CA and accepting any certificate contradict each other, so
+// neither one silently wins.
+func TestNewRemoteRefusesACAWithSkipVerify(t *testing.T) {
+	_, caFile, _ := tlsRegistry(t)
+
+	_, err := NewRemote(TLS{CAFile: caFile, SkipVerify: true})
+	if !errors.Is(err, ErrTLS) {
+		t.Fatalf("err = %v, want ErrTLS", err)
 	}
 }

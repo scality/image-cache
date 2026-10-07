@@ -177,6 +177,8 @@ the same rule: absolute, and without `..`.
 by a private CA, on top of the system ones. It is checked on every run, and
 never read for an archive. `--insecure-skip-tls-verify` accepts any
 certificate instead, for a test cluster only, and prints a warning.
+`--plain-http` reaches a registry that serves plain HTTP, and prints a warning
+too. It excludes the two certificate flags.
 
 The import refuses to replace a directory without a sentinel. The command runs
 as root, so a wrong name or cache path that lands on a directory the store did

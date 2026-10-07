@@ -22,8 +22,10 @@ The repository holds two toolchains, and three things built from them:
 
 Keep a change inside one component when you can. Reviewers read the repository
 that way, and the toolchains have nothing in common. Releases do not follow
-that split yet: a tag cuts one version for the whole repository, and the RPMs
-are what is attached to it.
+that split yet: a tag cuts one version for the whole repository. The RPMs are
+attached to it, and the agent image is published under the same tag. A merge
+to `main` that touches `agent/` also publishes an image; the tags are listed
+in [agent/README.md](agent/README.md#deploying).
 
 ## Development environment
 

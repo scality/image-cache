@@ -28,8 +28,23 @@ All the commands below run from this directory.
 
 ## Deploying
 
-Build and push the image, then deploy. `deploy` builds `config/default`, which
-includes the CRD, so it covers what `install` does on its own.
+The image is published at `ghcr.io/scality/image-cache-agent`, for amd64 only:
+
+| Tag | Image |
+| --- | ----- |
+| `vX.Y.Z`, `vX.Y.Z-<pre>` | built from that release tag |
+| `latest` | the last release without a pre-release suffix |
+| `latest-dev` | the last pre-release, or the last merge to `main` that touches `agent/` |
+| `<last tag>-<n>-g<sha>` | a merge to `main` that touches `agent/`, named by `git describe --tags`: `<n>` commits after the last release tag |
+
+Deploy it. `deploy` builds `config/default`, which includes the CRD, so it
+covers what `install` does on its own.
+
+```console
+make deploy IMG=ghcr.io/scality/image-cache-agent:<tag>
+```
+
+To deploy your own build, build and push it first:
 
 ```console
 make docker-build docker-push IMG=<your-registry>/image-cache-agent:<tag>

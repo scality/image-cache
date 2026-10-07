@@ -8,7 +8,18 @@ on:
       - "v*"
 
 jobs:
+  # Runs before the release is created, so a broken image blocks the release.
+  build:
+    uses: ./.github/workflows/agent-image.yaml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      is-latest: true
+      is-stable: ${{ ! contains(github.ref_name, '-') }}
+
   create-release:
+    needs: build
     uses: scality/workflows/.github/workflows/promote.yaml@f05282f5bd6d7e90e8536400cf468f0a54681a48 # v2.10.0
     permissions:
       contents: write

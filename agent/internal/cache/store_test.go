@@ -728,6 +728,30 @@ func TestAdoptAndReadRecordNeedASentinel(t *testing.T) {
 	}
 }
 
+// An unreadable sentinel is reported with its cause, not as a missing one.
+func TestReplaceableTellsAnUnreadableSentinelFromAMissingOne(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads the sentinel whatever the mode")
+	}
+	dir, s := t.TempDir(), Store{}
+	res := filepath.Join(dir, "c")
+	if err := os.MkdirAll(res, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(res, sentinelName), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(res, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(res, 0o755) })
+
+	err := s.Replaceable(dir, "c")
+	if !errors.Is(err, ErrExtract) || !errors.Is(err, os.ErrPermission) {
+		t.Errorf("err = %v, want ErrExtract caused by a permission error", err)
+	}
+}
+
 // A sentinel that cannot be read may still name another writer: the directory
 // is kept, and the failure reported, rather than removed on a doubt.
 func TestGCKeepsADirectoryWhoseSentinelCannotBeRead(t *testing.T) {

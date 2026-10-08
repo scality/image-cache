@@ -61,6 +61,9 @@ func Fill(
 	ctx context.Context, store cache.Store, p puller.Puller,
 	cachePath, name, source, owner string, onClose func(error),
 ) error {
+	if err := store.Replaceable(cachePath, name); err != nil {
+		return err
+	}
 	content, img, err := p.Pull(ctx, source)
 	if err != nil {
 		return err

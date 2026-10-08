@@ -329,6 +329,13 @@ func entryKind(flag byte) string {
 	}
 }
 
+// Replaceable reports whether an extraction of the named resource may replace
+// what is already in its directory. Extract checks it again at the swap; a
+// caller asks first so that it does not pull an image it could not publish.
+func (s Store) Replaceable(cachePath, name string) error {
+	return s.replaceable(s.dir(cachePath, name), name)
+}
+
 // replaceable reports whether the swap may remove what is already at final.
 // Only a directory bearing the sentinel may be: a name is not a claim on
 // whatever happens to sit under it. Without this, a resource named after a
@@ -343,7 +350,16 @@ func (s Store) replaceable(final, name string) error {
 			errors.WithDetail("looking at the directory to replace"),
 			errors.WithProperty("resource", name))
 	}
-	if _, err := os.Stat(filepath.Join(final, sentinelName)); err != nil {
+	_, err := os.Stat(filepath.Join(final, sentinelName))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Unreadable is not absent: a permission error here points at who
+		// owns the directory, not at what it holds.
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("reading the sentinel of the directory to replace"),
+			errors.WithProperty("resource", name),
+			errors.WithProperty("directory", final))
+	}
+	if err != nil {
 		return errors.Wrap(ErrExtract,
 			errors.WithDetail("what is already there was not written by this, "+
 				"so it is left alone: remove it by hand if it should go"),

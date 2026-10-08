@@ -6,7 +6,6 @@ package controller
 import (
 	"context"
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -27,6 +26,7 @@ import (
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 	"github.com/scality/image-cache/agent/internal/cache"
+	"github.com/scality/image-cache/agent/internal/fill"
 	"github.com/scality/image-cache/agent/internal/puller"
 )
 
@@ -160,23 +160,14 @@ func cachePathOf(ic *imagecachev1alpha1.ImageCache) string {
 // container filesystem.
 func (r *NodeReconciler) sync(ctx context.Context, ic *imagecachev1alpha1.ImageCache) error {
 	path := cachePathOf(ic)
-	if _, err := os.Stat(path); err != nil {
+	if err := fill.CheckCachePath(path); err != nil {
 		r.Recorder.Eventf(ic, nil, corev1.EventTypeWarning, "CachePathUnavailable", "Sync",
-			"cache path %s does not exist on node %s (is it mounted?)", path, r.NodeName)
-		return errors.Wrap(ErrSync, errors.CausedBy(err),
-			errors.WithDetail("the cache path is missing: is it mounted?"),
-			errors.WithProperty("cachePath", path))
+			"cache path %s is not usable on node %s (is it mounted?)", path, r.NodeName)
+		return errors.Wrap(ErrSync, errors.CausedBy(err))
 	}
-	content, digest, err := r.Puller.Pull(ctx, ic.Spec.Source)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if cerr := content.Close(); cerr != nil {
-			logf.FromContext(ctx).Error(cerr, "closing image stream", "resource", ic.Name)
-		}
-	}()
-	return r.Store.Extract(ctx, path, ic.Name, digest, content)
+	return fill.Fill(ctx, r.Store, r.Puller, path, ic.Name, ic.Spec.Source, func(cerr error) {
+		logf.FromContext(ctx).Error(cerr, "Failed to close the cache image stream", "resource", ic.Name)
+	})
 }
 
 // rememberPaths merges paths into the reconciler's lifetime set of known

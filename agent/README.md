@@ -50,10 +50,11 @@ registry into it.
 rather than with this checkout.
 
 The manifests under [`config/`](config) are a working example rather than a
-product. The agent mounts `/var/lib/image-cache` from the host and an init
-container hands that directory to the agent's UID, because `hostPath` ignores
-`fsGroup`, so the namespace has to enforce the `privileged` Pod Security
-Standard. The namespace these manifests create does not carry the label: add
+product. The agent mounts `/var/lib/image-cache` from the host, so the
+namespace has to enforce the `privileged` Pod Security Standard. It writes in
+that root-owned directory with `DAC_OVERRIDE` (see
+[DESIGN.md](DESIGN.md#container-image-and-deployment)). The namespace these
+manifests create does not carry the label: add
 `pod-security.kubernetes.io/enforce=privileged` to it, or deploy into a
 namespace that already has it. `test/e2e` does the former and is the shortest
 working reference. The DaemonSet also pins itself to

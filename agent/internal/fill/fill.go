@@ -21,8 +21,8 @@ import (
 var ErrCachePath = errors.New("the cache path is not usable")
 
 // ValidCachePath reports whether p can be a cache path: absolute, and with no
-// ".." anywhere, as a plain substring. The command runs as root, so a path
-// that could climb out is refused.
+// ".." anywhere, as a plain substring. The command runs as root and the agent
+// writes past file permissions, so a path that could climb out is refused.
 func ValidCachePath(p string) bool {
 	return filepath.IsAbs(p) && !strings.Contains(p, "..")
 }

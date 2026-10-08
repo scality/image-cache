@@ -22,6 +22,15 @@ COPY . .
 # by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager ./cmd/manager
 
+# The agent runs as UID 65532 and writes in a root-owned cache path, so it
+# needs cap_dac_override as a file capability. See "Container image and
+# deployment" in DESIGN.md. BuildKit keeps the xattr across the COPY below.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends libcap2-bin \
+    && rm -rf /var/lib/apt/lists/* \
+    && setcap cap_dac_override+ep manager \
+    && getcap manager
+
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3

@@ -47,6 +47,20 @@ const imageCacheName = "imagecache-e2e-smoke"
 // imageCacheName. See api/v1alpha1.ImageCache's doc comment for the contract.
 const nodeLabelKey = "image-cache.scality.com/" + imageCacheName
 
+// preexisting is what a node holds before the agent runs, written as root in
+// mode 0700: the temporary of an interrupted extraction and a directory with
+// a damaged sentinel. Both go.
+var preexisting = []string{
+	"/var/lib/image-cache/.seeded-e2e.tmp-1",
+	"/var/lib/image-cache/damaged-e2e",
+}
+
+var seedScript = "set -e\n" +
+	"mkdir -p " + strings.Join(preexisting, " ") + "\n" +
+	"chmod 0700 " + strings.Join(preexisting, " ") + "\n" +
+	"echo half > " + preexisting[0] + "/half.tar\n" +
+	"echo '{not json' > " + preexisting[1] + "/.image-cache-agent.json\n"
+
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
@@ -59,11 +73,9 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
 
-		// The agent mounts a hostPath volume for the cache directory, and its
-		// chown-cache init container needs root plus the CHOWN capability to
-		// hand that directory to the agent UID (fsGroup does not apply to
-		// hostPath). hostPath volumes are already disallowed starting at the
-		// "baseline" level, so this DaemonSet needs "privileged".
+		// The agent mounts a hostPath volume for the cache directory, which
+		// is already disallowed starting at the "baseline" level, so this
+		// DaemonSet needs "privileged".
 		By("labeling the namespace to enforce the privileged security policy")
 		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
 			"pod-security.kubernetes.io/enforce=privileged")
@@ -75,6 +87,10 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
 
+		By("writing root-owned directories into the cache path")
+		_, err = utils.OnKindNode(seedScript)
+		Expect(err).NotTo(HaveOccurred(), "Failed to seed the cache directory")
+
 		By("deploying the controller-manager")
 		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
 		_, err = utils.Run(cmd)
@@ -84,6 +100,9 @@ var _ = Describe("Manager", Ordered, func() {
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
 	// and deleting the namespace.
 	AfterAll(func() {
+		By("removing the preexisting directories")
+		_, _ = utils.OnKindNode("rm -rf " + strings.Join(preexisting, " "))
+
 		By("deleting the smoke-test ImageCache, in case an earlier step left it behind")
 		cmd := exec.Command("kubectl", "delete", "imagecache", imageCacheName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
@@ -171,6 +190,16 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
 			controllerPodName = podNames[0]
 			Expect(controllerPodName).To(ContainSubstring("controller-manager"))
+		})
+
+		It("should collect root-owned directories no resource keeps", func() {
+			// They are root's, in mode 0700, and hold a file: removing them
+			// takes DAC_OVERRIDE.
+			for _, gone := range preexisting {
+				Eventually(func() (string, error) {
+					return utils.OnKindNode("test -e " + gone + " && echo present || echo gone")
+				}).Should(Equal("gone\n"), gone)
+			}
 		})
 
 		// This is the smoke assertion for the label contract: watch, node

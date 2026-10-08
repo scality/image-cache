@@ -276,13 +276,18 @@ Three deployment constraints follow from the cache path living on the host:
   and leaves the label `pending`. Changing `--cache-path` means changing the
   mount with it, and the old directory is no longer collected: remove it by
   hand.
-- **The host directory must be writable by UID 65532.** `fsGroup` does not
-  apply to hostPath volumes. The sample manifest uses a root init container
-  that chowns the cache directory; integrators managing permissions at
-  provisioning time can drop it.
+- **The agent writes past file permissions, with `DAC_OVERRIDE`.** The
+  cache path is root's, and so is what `imagecachectl` seeds. `fsGroup` does
+  not apply to hostPath volumes, and a chown at pod start would miss what is
+  seeded later. The binary carries `cap_dac_override` as a file capability,
+  and the pod keeps `DAC_OVERRIDE` in its bounding set. Adding it to the pod
+  alone does nothing: a non-root process starts with an empty effective set.
+  Without it in the pod, the binary fails to start with `operation not
+  permitted`. `DAC_READ_SEARCH` is not enough: the agent also writes and
+  removes.
 - **The namespace must enforce the `privileged` Pod Security Standard.**
-  hostPath volumes are already disallowed at the `baseline` level, and the
-  chown init container runs as root, so the agent's namespace needs
+  hostPath volumes are already disallowed at the `baseline` level, so the
+  agent's namespace needs
   `pod-security.kubernetes.io/enforce: privileged` (see `test/e2e` for a
   working example).
 
@@ -304,4 +309,5 @@ The agent never writes ImageCache resources (no status, no finalizers).
   node labels and on-disk state, including failure paths.
 - A minimal kind-based e2e smoke test, with no registry infrastructure: CRD
   installed, agent running, node labelled `pending` for a resource with an
-  unreachable source, label cleared on deletion.
+  unreachable source, label cleared on deletion, and garbage collection of
+  root-owned directories, which needs `DAC_OVERRIDE`.

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -376,35 +377,47 @@ func TestState(t *testing.T) {
 	}
 }
 
-func TestGCOwnershipRules(t *testing.T) {
+// Garbage collection removes the agent's directories and the interrupted
+// extractions no resource keeps. Flat files stay, the preload service restores
+// from them, and so does lost+found when the cache path is a filesystem of its
+// own.
+func TestGCRemovesWhatNoResourceKeeps(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
-	if err := s.Extract(t.Context(), dir, "old", Record{Digest: "d"}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
+	if err := s.Extract(t.Context(), dir, "old", Record{Digest: "d", Owner: OwnerAgent}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Extract(t.Context(), dir, "kept", Record{Digest: "d"}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
+	if err := s.Extract(t.Context(), dir, "kept", Record{Digest: "d", Owner: OwnerAgent}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
-	// Foreign directory (no sentinel) and flat file: must survive.
-	if err := os.MkdirAll(filepath.Join(dir, "foreign"), 0o755); err != nil {
+	for _, d := range []string{".old.tmp-1", lostFound} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The command was killed after it wrote the sentinel in its temporary:
+	// still an interrupted extraction, not a seeded directory.
+	seededTmp := filepath.Join(dir, ".seeded.tmp-1")
+	if err := os.MkdirAll(seededTmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seededTmp, sentinelName), []byte(`{"owner":"`+otherOwner+`"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "boot.tar"), []byte("b"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Stale temporary directory: must be removed.
-	if err := os.MkdirAll(filepath.Join(dir, ".old.tmp-1"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+
 	removed, err := s.GC(dir, map[string]bool{"kept": true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(removed) != 2 { // "old" + stale tmp
-		t.Errorf("removed = %v, want [old and .old.tmp-1]", removed)
+	slices.Sort(removed)
+	if want := []string{".old.tmp-1", ".seeded.tmp-1", "old"}; !slices.Equal(removed, want) {
+		t.Errorf("removed = %v, want %v", removed, want)
 	}
-	for _, still := range []string{"kept", "foreign", "boot.tar"} {
-		if _, err := os.Stat(filepath.Join(dir, still)); err != nil {
-			t.Errorf("%s must survive GC: %v", still, err)
+	for _, name := range []string{"kept", "boot.tar", lostFound} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s must survive GC: %v", name, err)
 		}
 	}
 }
@@ -465,10 +478,9 @@ func TestExtractReplacesExistingDir(t *testing.T) {
 	}
 }
 
-// The cache path is shared, and a name is not a claim on whatever happens to
-// sit under it. A resource named after a neighbour of the cache path, or a
-// cache path one level too high, would otherwise make the swap an rm -rf of
-// somebody else's data: the command that calls this runs as root on a node.
+// The command runs as root, and a name is not a claim on whatever happens to
+// sit under it: a resource named after a neighbour of the cache path would
+// otherwise make the swap an rm -rf of somebody else's data.
 func TestExtractRefusesADirectoryItDidNotWrite(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
 	foreign := filepath.Join(dir, "containers")
@@ -634,5 +646,124 @@ func TestExtractRecordsWhoWroteTheDirectoryAndFromWhat(t *testing.T) {
 	got := sn.Record
 	if !reflect.DeepEqual(got, rec) {
 		t.Errorf("sentinel = %+v, want %+v", got, rec)
+	}
+}
+
+// A seeded directory has to survive garbage collection until a resource
+// claims it: at install the agent can land before the resources.
+func TestGCLeavesADirectoryAnotherWriterOwns(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sentinel string
+		kept     bool
+	}{
+		{"seeded by the command", `{"digest":"d","files":[],"owner":"` + otherOwner + `"}`, true},
+		{"written by the agent", `{"digest":"d","files":[],"owner":"` + OwnerAgent + `"}`, false},
+		{"naming no owner", `{"digest":"d","files":[]}`, true},
+		{"a sentinel that does not parse", `{not json`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, s := t.TempDir(), Store{}
+			res := filepath.Join(dir, "worker-134-0-0")
+			if err := os.MkdirAll(res, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(res, sentinelName), []byte(tc.sentinel), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			removed, err := s.GC(dir, map[string]bool{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, statErr := os.Stat(res)
+			if kept := statErr == nil; kept != tc.kept {
+				t.Errorf("kept = %v, want %v (removed %v)", kept, tc.kept, removed)
+			}
+		})
+	}
+}
+
+// A sentinel that cannot be read may still name another writer: the directory
+// is kept, and the failure reported, rather than removed on a doubt.
+func TestGCKeepsADirectoryWhoseSentinelCannotBeRead(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	res := filepath.Join(dir, "worker-134-0-0")
+	// A sentinel that is a directory cannot be read, even by root.
+	if err := os.MkdirAll(filepath.Join(res, sentinelName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.GC(dir, map[string]bool{})
+	if !errors.Is(err, ErrGC) {
+		t.Errorf("err = %v, want ErrGC", err)
+	}
+	if _, err := os.Stat(res); err != nil {
+		t.Errorf("the directory must survive: %v", err)
+	}
+}
+
+// Anything image-cache did not write goes: a directory with no sentinel, one
+// holding a subdirectory, a link. Removing a link leaves what it points to.
+func TestGCRemovesWhatImageCacheDidNotWrite(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	if err := os.MkdirAll(filepath.Join(dir, "toto", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "toto", "sub", "data"), []byte("d"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "data"), []byte("d"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := s.GC(dir, map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"link", "toto"}; !slices.Equal(removed, want) {
+		t.Errorf("removed = %v, want %v", removed, want)
+	}
+	for _, p := range []string{"toto", "link"} {
+		if _, err := os.Lstat(filepath.Join(dir, p)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s survived GC: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outside, "data")); err != nil {
+		t.Errorf("the link target was touched: %v", err)
+	}
+}
+
+// An entry GC cannot remove is reported, and the others still go.
+func TestGCReportsWhatItCannotRemoveAndGoesOn(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes whatever the mode")
+	}
+	dir, s := t.TempDir(), Store{}
+	stuck := filepath.Join(dir, "stuck")
+	if err := os.MkdirAll(stuck, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stuck, "data"), []byte("d"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stuck, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stuck, 0o755) })
+	if err := os.Mkdir(filepath.Join(dir, "stray"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := s.GC(dir, map[string]bool{})
+	if !errors.Is(err, ErrGC) || !errors.Is(err, os.ErrPermission) {
+		t.Errorf("err = %v, want ErrGC caused by a permission error", err)
+	}
+	if want := []string{"stray"}; !slices.Equal(removed, want) {
+		t.Errorf("removed = %v, want %v", removed, want)
 	}
 }

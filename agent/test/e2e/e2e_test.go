@@ -48,18 +48,25 @@ const imageCacheName = "imagecache-e2e-smoke"
 const nodeLabelKey = "image-cache.scality.com/" + imageCacheName
 
 // preexisting is what a node holds before the agent runs, written as root in
-// mode 0700: the temporary of an interrupted extraction and a directory with
-// a damaged sentinel. Both go.
+// mode 0700: a directory imagecachectl seeded, which stays, then what goes:
+// the temporary of an interrupted extraction, a directory with a damaged
+// sentinel, and two with no sentinel. The last one sorts after the seeded
+// directory, so once it is gone the pass has walked past the seeded one.
 var preexisting = []string{
+	"/var/lib/image-cache/seeded-e2e",
 	"/var/lib/image-cache/.seeded-e2e.tmp-1",
 	"/var/lib/image-cache/damaged-e2e",
+	"/var/lib/image-cache/nosentinel-e2e",
+	"/var/lib/image-cache/zz-nosentinel-e2e",
 }
 
 var seedScript = "set -e\n" +
 	"mkdir -p " + strings.Join(preexisting, " ") + "\n" +
 	"chmod 0700 " + strings.Join(preexisting, " ") + "\n" +
-	"echo half > " + preexisting[0] + "/half.tar\n" +
-	"echo '{not json' > " + preexisting[1] + "/.image-cache-agent.json\n"
+	`echo '{"digest":"sha256:seeded","files":[],"owner":"imagecachectl"}' > ` +
+	preexisting[0] + "/.image-cache-agent.json\n" +
+	"echo half > " + preexisting[1] + "/half.tar\n" +
+	"echo '{not json' > " + preexisting[2] + "/.image-cache-agent.json\n"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -87,7 +94,7 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
 
-		By("writing root-owned directories into the cache path")
+		By("seeding the cache directory as root, as imagecachectl would")
 		_, err = utils.OnKindNode(seedScript)
 		Expect(err).NotTo(HaveOccurred(), "Failed to seed the cache directory")
 
@@ -192,14 +199,19 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(controllerPodName).To(ContainSubstring("controller-manager"))
 		})
 
-		It("should collect root-owned directories no resource keeps", func() {
-			// They are root's, in mode 0700, and hold a file: removing them
-			// takes DAC_OVERRIDE.
-			for _, gone := range preexisting {
+		It("should collect what no resource keeps, and keep what imagecachectl seeded", func() {
+			// They are root's, in mode 0700, and some hold a file: removing
+			// them takes DAC_OVERRIDE.
+			for _, gone := range preexisting[1:] {
 				Eventually(func() (string, error) {
 					return utils.OnKindNode("test -e " + gone + " && echo present || echo gone")
 				}).Should(Equal("gone\n"), gone)
 			}
+
+			out, err := utils.OnKindNode("stat -c '%u %n' " + preexisting[0] +
+				" && grep -c '\"owner\":\"imagecachectl\"' " + preexisting[0] + "/.image-cache-agent.json")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(Equal("0 " + preexisting[0] + "\n1\n"))
 		})
 
 		// This is the smoke assertion for the label contract: watch, node

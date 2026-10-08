@@ -21,9 +21,7 @@ import (
 const DefaultPath = "/var/lib/image-cache"
 
 // sentinelName marks a directory as fully extracted by the store, and names
-// who wrote it. It is written last; garbage collection only considers
-// directories bearing it, so foreign content in a shared cache path is never
-// touched.
+// who wrote it. It is written last.
 const sentinelName = ".image-cache-agent.json"
 
 // Failures of this package are classified by these sentinels. Filesystem and
@@ -49,7 +47,13 @@ const (
 	Complete
 )
 
-// OwnerAgent is the owner the agent writes in a sentinel.
+// lostFound is where fsck puts orphaned inodes back, at the root of an ext
+// filesystem.
+const lostFound = "lost+found"
+
+// OwnerAgent is the owner the agent writes in a sentinel. Another owner, or
+// none, means another writer seeded the directory: garbage collection leaves
+// it.
 const OwnerAgent = "image-cache-agent"
 
 // Record is what the sentinel remembers about a directory's content, beyond
@@ -267,11 +271,10 @@ func entryKind(flag byte) string {
 }
 
 // replaceable reports whether the swap may remove what is already at final.
-// Only a directory bearing the sentinel may be, which is the same rule GC
-// applies: the cache path is shared, and a name is not a claim on whatever
-// happens to sit under it. Without this, a resource named after a neighbour
-// of the cache path, or a cache path one level too high, turns the swap into
-// an rm -rf of somebody else's data.
+// Only a directory bearing the sentinel may be: a name is not a claim on
+// whatever happens to sit under it. Without this, a resource named after a
+// neighbour of the cache path turns the swap into an rm -rf of somebody
+// else's data.
 func (s Store) replaceable(final, name string) error {
 	if _, err := os.Stat(final); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -321,9 +324,29 @@ func (s Store) SweepTemporaries(cachePath, name string) ([]string, error) {
 	return removed, utilerrors.NewAggregate(errs)
 }
 
-// GC removes agent-owned directories (sentinel-bearing, plus stale hidden
-// temporaries) under cachePath whose name is not in keep. Flat files and
-// foreign directories survive. Returns the removed names.
+// seeded reports whether a writer other than the agent wrote dir: content
+// waiting for its resource. A missing sentinel or one that does
+// not parse is not seeded. A sentinel that cannot be read is an error: the
+// directory may be seeded, and removing it would lose content an air-gapped
+// node cannot fetch again.
+func (Store) seeded(dir string) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(dir, sentinelName))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var sn sentinel
+	if json.Unmarshal(data, &sn) != nil {
+		return false, nil
+	}
+	return sn.Owner != OwnerAgent, nil
+}
+
+// GC removes the entries under cachePath that keep does not name, and
+// returns their names. A few stay: "Cache layout" in agent/DESIGN.md lists
+// them and why.
 func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
 	entries, err := os.ReadDir(cachePath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -336,18 +359,28 @@ func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
 	var removed []string
 	var errs []error
 	for _, e := range entries {
-		if !e.IsDir() || keep[e.Name()] {
+		if keep[e.Name()] || e.Type().IsRegular() || e.Name() == lostFound {
 			continue
 		}
+		// An interrupted extraction goes whoever started it. Its sentinel,
+		// written before the rename, does not make it seeded.
 		stale := strings.HasPrefix(e.Name(), ".") && strings.Contains(e.Name(), ".tmp-")
-		if !stale {
-			if _, err := os.Stat(filepath.Join(cachePath, e.Name(), sentinelName)); err != nil {
+		if e.IsDir() && !stale {
+			seeded, err := s.seeded(filepath.Join(cachePath, e.Name()))
+			if err != nil {
+				errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),
+					errors.WithDetail("reading the sentinel, so the directory is kept"),
+					errors.WithProperty("entry", e.Name())))
+				continue
+			}
+			if seeded {
 				continue
 			}
 		}
+		// A link goes, not what it points to.
 		if err := os.RemoveAll(filepath.Join(cachePath, e.Name())); err != nil {
 			errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),
-				errors.WithProperty("directory", e.Name())))
+				errors.WithProperty("entry", e.Name())))
 			continue
 		}
 		removed = append(removed, e.Name())

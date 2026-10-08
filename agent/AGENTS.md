@@ -114,6 +114,6 @@ Do not scaffold them back in:
 - A `manager.Runnable` whose `Start` returns `nil` is treated as finished
   normally. Returning `nil` when the component died on its own leaves an agent
   that looks healthy and silently stopped watching.
-- The cache is shared with whatever else writes into it. The agent only
-  deletes a directory carrying its own sentinel, or one of its interrupted
-  extractions. Keep it that way.
+- Garbage collection removes what no resource keeps, except what "Cache
+  layout" in `DESIGN.md` lists. Never collect a directory another writer
+  seeded.

@@ -86,9 +86,10 @@ spec:
   selects every node.
 
 The agent extracts each resource into `<cache path>/<name>/`, the cache path
-being its `--cache-path` flag (see [Configuration](#configuration)). It deletes
-only what it owns: a directory carrying its sentinel, or one of its own
-interrupted extractions.
+being its `--cache-path` flag (see [Configuration](#configuration)). Garbage
+collection removes what no resource keeps, with a few exceptions, flat files
+and directories `imagecachectl` seeded among them:
+[DESIGN.md](DESIGN.md#cache-layout) has the list.
 
 The name ends up in a node label, so it is capped at 63 characters and
 `generateName` is a bad idea. Watch progress on the label:
@@ -109,7 +110,8 @@ in the manifests, and exits at startup without it. `--help` lists the flags.
 `--cache-path` is the host directory the agent fills, `/var/lib/image-cache` by
 default. It must be absolute and must not contain `..`, or the agent exits at
 startup. One agent writes one cache path. The DaemonSet mounts the default
-one: change the mount with the flag.
+one: change the mount with the flag. Give it a directory of its own: the
+agent removes anything there that no resource keeps.
 
 `--resync-period` is one hour by default: it bounds how long a drift that
 raised no event at all can last. Resource changes and tampering with the cache

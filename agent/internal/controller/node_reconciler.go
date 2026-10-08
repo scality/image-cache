@@ -100,8 +100,12 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 		want[ic.Name] = StatusSynced
 	}
 
-	if _, err := r.Store.GC(r.CachePath, keep); err != nil {
+	removed, err := r.Store.GC(r.CachePath, keep)
+	if err != nil {
 		errs = append(errs, errors.Wrap(err, errors.WithProperty("cachePath", r.CachePath)))
+	}
+	if len(removed) > 0 {
+		log.Info("Removed cache entries no resource keeps", "cachePath", r.CachePath, "entries", removed)
 	}
 	if err := r.patchLabels(ctx, &node, want); err != nil {
 		errs = append(errs, err)

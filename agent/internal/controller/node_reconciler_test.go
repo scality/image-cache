@@ -18,12 +18,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 	"github.com/scality/image-cache/agent/internal/cache"
+	"github.com/scality/image-cache/agent/internal/cli"
 	"github.com/scality/image-cache/agent/internal/puller"
 )
 
@@ -60,6 +62,9 @@ const (
 	fsRepairLabelKey = "fsrepair"
 	fsRepairLabelYes = "yes"
 	fsResourceName   = "fsrepair-1-0-0"
+
+	// strayNodeName backs the "stray cache entries" suite below.
+	strayNodeName = "stray-node"
 )
 
 // fakePuller is a mutable, race-safe puller.Puller: tests flip fail to
@@ -256,6 +261,43 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 			return hasNodeLabel(ctx, nodeKey, workerResourceName)
 		}).Should(BeFalse())
 	})
+
+	// At install the agent can land before the resources that name what the
+	// command seeded. Its garbage collection runs on every pass, and has to
+	// leave a directory another writer owns until a resource claims it. A
+	// directory the agent wrote itself, with nothing claiming it, is the
+	// witness that the collection did run meanwhile.
+	It("leaves a directory the command seeded alone until a resource claims it", func() {
+		seeded := filepath.Join(cacheDir, "seeded-134-0-0")
+		orphan := filepath.Join(cacheDir, "orphan-134-0-0")
+		for dir, owner := range map[string]string{seeded: cli.Owner, orphan: cache.OwnerAgent} {
+			placeDirectory(dir, "etcd", `{"digest":"d","files":["`+etcdTarName+`"],"owner":"`+owner+`"}`)
+		}
+
+		By("triggering a pass over the cache path with a resource that selects nothing here")
+		trigger := &imagecachev1alpha1.ImageCache{
+			ObjectMeta: metav1.ObjectMeta{Name: "trigger-134-0-0"},
+			Spec: imagecachev1alpha1.ImageCacheSpec{
+				NodeSelector: map[string]string{zoneLabelKey: "mars"},
+				Source:       "registry.example.com/boot-cache-other:134.0.0",
+			},
+		}
+		Expect(k8sClient.Create(ctx, trigger)).To(Succeed())
+
+		By("waiting for the agent's own orphan to be collected")
+		Eventually(func() bool {
+			_, err := os.Stat(orphan)
+			return os.IsNotExist(err)
+		}).Should(BeTrue())
+
+		By("checking the seeded directory is still whole")
+		Consistently(func() ([]byte, error) {
+			return os.ReadFile(filepath.Join(seeded, etcdTarName))
+		}, "3s").Should(Equal([]byte("etcd")))
+
+		Expect(k8sClient.Delete(ctx, trigger)).To(Succeed())
+		Expect(os.RemoveAll(seeded)).To(Succeed())
+	})
 })
 
 // startOwnReconciler runs r under a second manager, next to the suite's one,
@@ -336,6 +378,60 @@ var _ = Describe("startup pass", func() {
 		Eventually(func() (bool, error) {
 			return hasNodeLabel(ctx, staleNodeKey, "gone-1-0-0")
 		}, 10*time.Second).Should(BeFalse())
+	})
+})
+
+// An entry no resource keeps goes when it is not a seeded directory: no
+// sentinel, a damaged one, a link.
+var _ = Describe("stray cache entries", func() {
+	It("removes them", func() {
+		ctx := context.Background()
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: strayNodeName}}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(k8sClient.Delete(context.Background(), node)).To(Succeed())
+		})
+		dir := GinkgoT().TempDir()
+		stray := filepath.Join(dir, "toto")
+		Expect(os.MkdirAll(stray, 0o755)).To(Succeed())
+
+		r := &NodeReconciler{
+			Client:    k8sClient,
+			Recorder:  events.NewFakeRecorder(10),
+			NodeName:  strayNodeName,
+			CachePath: dir,
+			Puller:    &fakePuller{},
+			Resync:    time.Hour,
+		}
+		res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: strayNodeName}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(time.Hour))
+		Expect(stray).NotTo(BeAnExistingFile())
+	})
+
+	It("fails the pass when it cannot tell whether a directory is seeded", func() {
+		ctx := context.Background()
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: strayNodeName}}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(k8sClient.Delete(context.Background(), node)).To(Succeed())
+		})
+		dir := GinkgoT().TempDir()
+		// A sentinel that is a directory cannot be read, even by root.
+		unreadable := filepath.Join(dir, "toto")
+		Expect(os.MkdirAll(filepath.Join(unreadable, ".image-cache-agent.json"), 0o755)).To(Succeed())
+
+		r := &NodeReconciler{
+			Client:    k8sClient,
+			Recorder:  events.NewFakeRecorder(10),
+			NodeName:  strayNodeName,
+			CachePath: dir,
+			Puller:    &fakePuller{},
+			Resync:    time.Hour,
+		}
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: strayNodeName}})
+		Expect(err).To(MatchError(cache.ErrGC))
+		Expect(unreadable).To(BeADirectory())
 	})
 })
 
@@ -492,6 +588,17 @@ var _ = Describe("filesystem repair", func() {
 		}, 10*time.Second).Should(Equal([]byte("etcd")))
 	})
 })
+
+// placeDirectory writes a complete resource directory at dir in one rename,
+// as the command does: the agent removes a directory with no sentinel yet.
+func placeDirectory(dir, content, sentinel string) {
+	GinkgoHelper()
+	tmp, err := os.MkdirTemp(filepath.Dir(cacheDir), "seed-")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(os.WriteFile(filepath.Join(tmp, etcdTarName), []byte(content), 0o644)).To(Succeed())
+	Expect(os.WriteFile(filepath.Join(tmp, ".image-cache-agent.json"), []byte(sentinel), 0o644)).To(Succeed())
+	Expect(os.Rename(tmp, dir)).To(Succeed())
+}
 
 // nodeLabel returns the value of the image-cache.scality.com/<name> label
 // on the named node.

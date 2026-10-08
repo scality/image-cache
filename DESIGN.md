@@ -62,11 +62,11 @@ maintain it.
 ```
 
 The preload service imports the flat tarballs and those one level down, which
-covers both writers. The agent works exclusively inside its own
-subdirectories, one per resource. It deletes a directory only when that
-directory carries its sentinel, or when the name marks it as one of its own
-interrupted extractions (hidden, and holding `.tmp-`), so a cache shared with
-provisioning tooling is safe from it.
+covers both writers. The agent and the command write inside their own
+subdirectories, one per resource. The agent removes what no resource keeps,
+except flat files and directories `imagecachectl` seeded;
+[agent/DESIGN.md](agent/DESIGN.md#cache-layout) has the full rule.
+
 A subdirectory per resource also lets two versions of the same content coexist
 during an upgrade, where flat tarballs would collide on identical file names.
 

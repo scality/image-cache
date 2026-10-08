@@ -86,7 +86,7 @@ to `/var/lib/image-cache` like containerd-image-preload:
 
 ```
 /var/lib/image-cache/
-├── some-bootstrap-image.tar        # flat files are never touched by the agent
+├── some-bootstrap-image.tar        # flat file: kept
 ├── worker-133-0-0/
 │   ├── .image-cache-agent.json     # sentinel, written last
 │   └── *.tar
@@ -103,13 +103,28 @@ one directory.
 The sentinel file is written after everything else. It marks the directory as
 complete and records who wrote it:
 
-- **Ownership**: garbage collection only ever considers directories containing
-  a sentinel, plus the agent's own interrupted extractions (hidden, and holding
-  `.tmp-`, see below). Flat tarballs (e.g. placed by provisioning at bootstrap)
-  and foreign directories in a shared cache path are never touched.
-- **Completeness**: a directory without a sentinel is a partial extraction and
-  is redone. The sentinel lists the expected file names, so a manually deleted
-  tarball is detected and repaired.
+- **Ownership**: the cache path belongs to image-cache. Garbage collection
+  removes every entry no resource keeps, whoever wrote it: a directory with
+  no sentinel or a damaged one, a link (not what it points to), an
+  interrupted extraction. The agent logs what it removes. Only these stay:
+  - regular flat files (a link goes): provisioning writes them, and the
+    preload service restores from them;
+  - a directory whose sentinel names another writer, `imagecachectl` for
+    instance (see the one-shot command below): at install the agent can land
+    before the resources that name it, and collecting it would pull the same
+    gigabyte again. A sentinel that names no owner counts as another writer;
+  - `lost+found`, when the cache path is a filesystem of its own;
+  - a directory whose sentinel cannot be read. It may be seeded, so it stays,
+    and the pass fails until the sentinel can be read.
+
+  Give `--cache-path` a directory of its own: anything else there is
+  removed.
+- **Completeness**: the sentinel lists the expected file names, so a manually
+  deleted tarball is detected and the directory is extracted again. A
+  directory without a sentinel was not written by the store, since it
+  extracts in a hidden temporary: it is never replaced (see the one-shot
+  command below). The agent refuses it too: its resource stays `pending`,
+  with a `SyncFailed` event, until someone removes the directory.
 - **Traceability**: the sentinel records who wrote the directory, the source
   it was read from, the manifest digest and the diff IDs of the image's
   layers.
@@ -171,8 +186,8 @@ One pass:
 2. For each desired resource: if its directory is complete, done. Otherwise
    set the label to `pending`, pull `spec.source` (linux/amd64), extract
    atomically, then set the label to `synced`.
-3. Garbage-collect: in the cache path, delete the sentinel-bearing
-   directories that no desired resource claims.
+3. Garbage-collect: in the cache path, delete what no desired resource
+   claims, within the ownership rules above.
 4. Remove `image-cache.scality.com/*` node labels that no desired resource
    claims.
 
@@ -239,17 +254,18 @@ Three consequences worth stating:
 
 - **The name is the caller's.** It becomes the resource directory, and the
   agent recognises a resource by it. Given the name the `ImageCache` will
-  carry, the agent finds the sentinel, reads it as complete, and pulls
-  nothing. Given any other name, garbage collection removes the directory,
-  since it bears the sentinel and nothing claims it. The command validates
-  the name as a DNS-1123 subdomain, the rule the API server applies to the
-  resource, so the two cannot disagree on what a name is.
+  carry, the agent finds the directory complete and takes it as it is.
+  Given any other name, the directory stays:
+  garbage collection leaves what the command wrote, and no resource claims
+  it, so it is the caller's to remove. The command validates the name as a
+  DNS-1123 subdomain, the rule the API server applies to the resource, so the
+  two cannot disagree on what a name is.
 - **It replaces only what the store wrote.** The swap that publishes a
   resource removes whatever is at the destination first, so it refuses a
-  directory that does not bear the sentinel. The cache path is shared, and a
-  name is not a claim on what happens to sit under it: without the check, a
-  resource named after a neighbour of the cache path, or a cache path one
-  level too high, is an `rm -rf` of somebody else's data, run as root.
+  directory that does not bear the sentinel. A name is not a claim on what
+  happens to sit under it: without the check, a resource named after a
+  neighbour of the cache path is an `rm -rf` of somebody else's data, run as
+  root.
 - **It fills once.** The state of the directory decides, not a comparison
   against the registry: once a resource is complete the command reaches no
   registry, whatever the source now points at. Keeping a node up to date is
@@ -306,7 +322,8 @@ The agent never writes ImageCache resources (no status, no finalizers).
 - Puller tests against go-containerregistry's in-memory registry, pulling a
   forged image whose layers contain tarballs.
 - envtest: the full reconciler with a fake puller, from resource lifecycle to
-  node labels and on-disk state, including failure paths.
+  node labels and on-disk state: failure paths and entries the agent did
+  not write.
 - A minimal kind-based e2e smoke test, with no registry infrastructure: CRD
   installed, agent running, node labelled `pending` for a resource with an
   unreachable source, label cleared on deletion, and garbage collection of

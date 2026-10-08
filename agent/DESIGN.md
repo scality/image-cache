@@ -100,8 +100,8 @@ Per-resource subdirectories make name collisions between versions impossible
 and make garbage collection atomic: removing a resource's cache is removing
 one directory.
 
-The sentinel file is written after everything else and marks the directory as
-complete and agent-owned:
+The sentinel file is written after everything else. It marks the directory as
+complete and records who wrote it:
 
 - **Ownership**: garbage collection only ever considers directories containing
   a sentinel, plus the agent's own interrupted extractions (hidden, and holding
@@ -110,10 +110,12 @@ complete and agent-owned:
 - **Completeness**: a directory without a sentinel is a partial extraction and
   is redone. The sentinel lists the expected file names, so a manually deleted
   tarball is detected and repaired.
-- **Traceability**: the sentinel records the resolved image digest.
+- **Traceability**: the sentinel records who wrote the directory, the source
+  it was read from, the manifest digest and the diff IDs of the image's
+  layers.
 
 The name is the agent's own: an entry carrying it inside a cache image is
-skipped, so the sentinel always describes what the agent extracted. Entries
+skipped, so the sentinel always describes what the store extracted. Entries
 are extracted by base name, so nothing in an image can write outside its
 directory. Directory entries are skipped, since everything lands flat, and any
 other kind of entry refuses the image whole. A symbolic link or a device is

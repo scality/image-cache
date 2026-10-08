@@ -127,7 +127,7 @@ func (r *NodeReconciler) sync(ctx context.Context, ic *imagecachev1alpha1.ImageC
 			"cache path %s is not usable on node %s (is it mounted?)", r.CachePath, r.NodeName)
 		return errors.Wrap(ErrSync, errors.CausedBy(err))
 	}
-	return fill.Fill(ctx, r.Store, r.Puller, r.CachePath, ic.Name, ic.Spec.Source, func(cerr error) {
+	return fill.Fill(ctx, r.Store, r.Puller, r.CachePath, ic.Name, ic.Spec.Source, cache.OwnerAgent, func(cerr error) {
 		logf.FromContext(ctx).Error(cerr, "Failed to close the cache image stream", "resource", ic.Name)
 	})
 }

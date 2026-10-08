@@ -10,12 +10,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
 
 // testTar is the file name used by fixtures that only need a single file.
 const testTar = "a.tar"
+
+// otherOwner is a writer that is not the agent, the command for one.
+const otherOwner = "imagecachectl"
+
+// testDigest is the manifest digest fixtures record when it does not matter.
+const testDigest = "sha256:abc"
 
 // Archive paths as a cache image carries them, under a directory, and the
 // content fixtures give the first.
@@ -81,7 +88,7 @@ func tarStream(t *testing.T, files map[string]string) *bytes.Buffer {
 func TestExtractFlattensAndCompletes(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
 	stream := tarStream(t, map[string]string{etcdEntry: "e", pauseEntry: "p"})
-	if err := s.Extract(t.Context(), dir, "worker-134-0-0", "sha256:abc", stream); err != nil {
+	if err := s.Extract(t.Context(), dir, "worker-134-0-0", Record{Digest: testDigest}, stream); err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range []string{"etcd.tar", "pause.tar", sentinelName} {
@@ -97,7 +104,7 @@ func TestExtractFlattensAndCompletes(t *testing.T) {
 func TestExtractRejectsDuplicateBaseNames(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
 	stream := tarStream(t, map[string]string{"a/x.tar": "1", "b/x.tar": "2"})
-	if err := s.Extract(t.Context(), dir, "c", "sha256:abc", stream); err == nil {
+	if err := s.Extract(t.Context(), dir, "c", Record{Digest: testDigest}, stream); err == nil {
 		t.Fatal("want duplicate error, got nil")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "c")); !os.IsNotExist(err) {
@@ -113,14 +120,14 @@ func TestExtractIgnoresAnImagesOwnSentinel(t *testing.T) {
 		etcdEntry:                "e",
 		"images/" + sentinelName: `{"digest":"sha256:evil","files":["etcd.tar"]}`,
 	})
-	if err := s.Extract(t.Context(), dir, "c", "sha256:abc", stream); err != nil {
+	if err := s.Extract(t.Context(), dir, "c", Record{Digest: testDigest}, stream); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "c", sentinelName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "sha256:abc") {
+	if !strings.Contains(string(data), testDigest) {
 		t.Errorf("sentinel not written by the store: %s", data)
 	}
 	if st, _ := s.State(dir, "c"); st != Complete {
@@ -145,7 +152,7 @@ func TestExtractConfinesHostileEntries(t *testing.T) {
 		},
 		[]string{"escaped", "root:x:0:0", "", "h"},
 	)
-	if err := s.Extract(t.Context(), dir, "c", "sha256:abc", stream); err != nil {
+	if err := s.Extract(t.Context(), dir, "c", Record{Digest: testDigest}, stream); err != nil {
 		t.Fatal(err)
 	}
 
@@ -169,7 +176,8 @@ func TestExtractConfinesHostileEntries(t *testing.T) {
 
 // An entry whose name has no file name to land under is refused whole, and
 // said to be what it is. Opening it would hit the temporary directory or its
-// parent: nothing escapes, but the failure used to read as a duplicate.
+// parent: nothing escapes, but the failure has to name it, not read as a
+// duplicate.
 func TestExtractRefusesAnEntryWithNoFileName(t *testing.T) {
 	for _, name := range []string{"", ".", "..", "images/.", "images/.."} {
 		dir, s := t.TempDir(), Store{}
@@ -180,7 +188,7 @@ func TestExtractRefusesAnEntryWithNoFileName(t *testing.T) {
 			},
 			[]string{etcdBody, "x"},
 		)
-		err := s.Extract(t.Context(), dir, "c", "d", stream)
+		err := s.Extract(t.Context(), dir, "c", Record{Digest: "d"}, stream)
 		if err == nil || !strings.Contains(err.Error(), "has no file name") {
 			t.Errorf("%q: err = %v, want it refused for having no file name", name, err)
 		}
@@ -205,7 +213,7 @@ func TestExtractAcceptsGlobalHeadersAndContiguousFiles(t *testing.T) {
 		},
 		[]string{"", etcdBody, "pause"},
 	)
-	if err := s.Extract(t.Context(), dir, "c", "d", stream); err != nil {
+	if err := s.Extract(t.Context(), dir, "c", Record{Digest: "d"}, stream); err != nil {
 		t.Fatalf("a legitimate image was refused: %v", err)
 	}
 	for name, want := range map[string]string{"etcd.tar": etcdBody, "pause.tar": "pause"} {
@@ -247,7 +255,7 @@ func TestExtractRefusesNonRegularEntries(t *testing.T) {
 				[]string{etcdBody, ""},
 			)
 
-			err := s.Extract(t.Context(), dir, "c", "d", stream)
+			err := s.Extract(t.Context(), dir, "c", Record{Digest: "d"}, stream)
 			if err == nil {
 				t.Fatal("an image carrying " + tc.kind + " was accepted")
 			}
@@ -277,7 +285,7 @@ func TestExtractStopsOnCancelledContext(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	err := s.Extract(ctx, dir, "c", "sha256:abc", tarStream(t, map[string]string{testTar: "1"}))
+	err := s.Extract(ctx, dir, "c", Record{Digest: testDigest}, tarStream(t, map[string]string{testTar: "1"}))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
@@ -327,7 +335,7 @@ func TestExtractStopsInTheMiddleOfAnEntry(t *testing.T) {
 	defer cancel()
 	src := &cancelAfter{r: pr, n: 1 << 20, cancel: cancel}
 
-	err := s.Extract(ctx, dir, "c", "sha256:abc", src)
+	err := s.Extract(ctx, dir, "c", Record{Digest: testDigest}, src)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
@@ -357,7 +365,7 @@ func TestState(t *testing.T) {
 	if st, _ := s.State(dir, "bare"); st != Incomplete {
 		t.Errorf("no sentinel: state = %v, want Incomplete", st)
 	}
-	if err := s.Extract(t.Context(), dir, "x", "d", tarStream(t, map[string]string{testTar: "1"})); err != nil {
+	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(filepath.Join(dir, "x", testTar)); err != nil {
@@ -370,10 +378,10 @@ func TestState(t *testing.T) {
 
 func TestGCOwnershipRules(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
-	if err := s.Extract(t.Context(), dir, "old", "d", tarStream(t, map[string]string{testTar: "1"})); err != nil {
+	if err := s.Extract(t.Context(), dir, "old", Record{Digest: "d"}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Extract(t.Context(), dir, "kept", "d", tarStream(t, map[string]string{testTar: "1"})); err != nil {
+	if err := s.Extract(t.Context(), dir, "kept", Record{Digest: "d"}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
 	// Foreign directory (no sentinel) and flat file: must survive.
@@ -409,7 +417,7 @@ func TestGCOnMissingPathIsNoop(t *testing.T) {
 
 func TestStateCorruptSentinel(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
-	if err := s.Extract(t.Context(), dir, "c", "d", tarStream(t, map[string]string{testTar: "1"})); err != nil {
+	if err := s.Extract(t.Context(), dir, "c", Record{Digest: "d"}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "c", sentinelName), []byte("{not json"), 0o644); err != nil {
@@ -426,13 +434,13 @@ func TestStateCorruptSentinel(t *testing.T) {
 
 func TestExtractReplacesExistingDir(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
-	if err := s.Extract(t.Context(), dir, "r", digestD1, tarStream(t, map[string]string{oldTarName: "1"})); err != nil {
+	if err := s.Extract(t.Context(), dir, "r", Record{Digest: digestD1}, tarStream(t, map[string]string{oldTarName: "1"})); err != nil {
 		t.Fatal(err)
 	}
 	if st, _ := s.State(dir, "r"); st != Complete {
 		t.Fatalf("first extraction: state = %v, want Complete", st)
 	}
-	if err := s.Extract(t.Context(), dir, "r", digestD2, tarStream(t, map[string]string{newTarName: "2"})); err != nil {
+	if err := s.Extract(t.Context(), dir, "r", Record{Digest: digestD2}, tarStream(t, map[string]string{newTarName: "2"})); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "r", newTarName)); err != nil {
@@ -472,7 +480,7 @@ func TestExtractRefusesADirectoryItDidNotWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := s.Extract(t.Context(), dir, "containers", "d",
+	err := s.Extract(t.Context(), dir, "containers", Record{Digest: "d"},
 		tarStream(t, map[string]string{testTar: "1"}))
 	if err == nil {
 		t.Fatal("extraction was allowed over a directory without the sentinel")
@@ -498,7 +506,7 @@ func TestExtractRefusesAFileWhereTheDirectoryGoes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.Extract(t.Context(), dir, "taken", "d",
+	if err := s.Extract(t.Context(), dir, "taken", Record{Digest: "d"},
 		tarStream(t, map[string]string{testTar: "1"})); err == nil {
 		t.Fatal("extraction was allowed over a regular file")
 	}
@@ -548,7 +556,7 @@ func TestSweepTemporariesRemovesOnlyThisResourcesLeftovers(t *testing.T) {
 func TestExtractRefusesAnImageWithNothingToCache(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
 
-	err := s.Extract(t.Context(), dir, "empty", "d", tarStream(t, map[string]string{}))
+	err := s.Extract(t.Context(), dir, "empty", Record{Digest: "d"}, tarStream(t, map[string]string{}))
 	if err == nil {
 		t.Fatal("an image carrying no file was accepted")
 	}
@@ -598,11 +606,33 @@ func TestExtractRefusesAStreamEndingInAWrappedEOF(t *testing.T) {
 	}
 	// No trailer: the stream fails right after the first entry.
 
-	err := s.Extract(t.Context(), dir, "c", "d", eofAfter{buf})
+	err := s.Extract(t.Context(), dir, "c", Record{Digest: "d"}, eofAfter{buf})
 	if err == nil {
 		t.Fatal("a stream that failed was published as complete")
 	}
 	if st, _ := s.State(dir, "c"); st != Absent {
 		t.Errorf("state = %v, want Absent", st)
+	}
+}
+
+// The sentinel remembers who wrote the directory, from what, and which image
+// it holds, next to the files it lists.
+func TestExtractRecordsWhoWroteTheDirectoryAndFromWhat(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	rec := Record{Owner: otherOwner, Source: "/mnt/iso/boot-cache.tar", Digest: "sha256:manifest", Layers: []string{"sha256:layer"}}
+	if err := s.Extract(t.Context(), dir, "c", rec, tarStream(t, map[string]string{testTar: "1"})); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "c", sentinelName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sn sentinel
+	if err := json.Unmarshal(data, &sn); err != nil {
+		t.Fatal(err)
+	}
+	got := sn.Record
+	if !reflect.DeepEqual(got, rec) {
+		t.Errorf("sentinel = %+v, want %+v", got, rec)
 	}
 }

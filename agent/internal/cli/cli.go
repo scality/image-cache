@@ -34,6 +34,9 @@ func printf(w io.Writer, format string, args ...any) {
 // reports: 130 for SIGINT, 143 for SIGTERM.
 const ExitInterrupted = 130
 
+// Owner is the owner the command writes in a sentinel.
+const Owner = "imagecachectl"
+
 const importLong = `Fills the image cache with the archives a boot cache image carries.
 
 <source> is either the path of a docker archive or the reference of an image
@@ -182,7 +185,7 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out
 		printf(out, "cleared %d leftover directory from an interrupted run\n", len(swept))
 	}
 
-	if err := fill.Fill(ctx, store, src, cachePath, name, source, func(cerr error) {
+	if err := fill.Fill(ctx, store, src, cachePath, name, source, Owner, func(cerr error) {
 		printf(errOut, "imagecachectl: closing the image stream: %s\n", cerr)
 	}); err != nil {
 		return err

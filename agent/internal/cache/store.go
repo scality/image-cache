@@ -20,9 +20,10 @@ import (
 // it: change them together.
 const DefaultPath = "/var/lib/image-cache"
 
-// sentinelName marks a directory as fully extracted and agent-owned.
-// It is written last; garbage collection only considers directories
-// bearing it, so foreign content in a shared cache path is never touched.
+// sentinelName marks a directory as fully extracted by the store, and names
+// who wrote it. It is written last; garbage collection only considers
+// directories bearing it, so foreign content in a shared cache path is never
+// touched.
 const sentinelName = ".image-cache-agent.json"
 
 // Failures of this package are classified by these sentinels. Filesystem and
@@ -48,9 +49,29 @@ const (
 	Complete
 )
 
+// OwnerAgent is the owner the agent writes in a sentinel.
+const OwnerAgent = "image-cache-agent"
+
+// Record is what the sentinel remembers about a directory's content, beyond
+// the files it lists.
+type Record struct {
+	// Digest is the manifest digest the source served.
+	Digest string `json:"digest"`
+	// Owner is who wrote the directory.
+	Owner string `json:"owner,omitempty"`
+	// Source is the reference or the archive path the content was read from,
+	// kept for whoever looks at the directory. Two sources naming the same
+	// image can differ, so it is not what an image is compared by.
+	Source string `json:"source,omitempty"`
+	// Layers are the image's layer diff IDs, as puller.Image reports them.
+	Layers []string `json:"layers,omitempty"`
+}
+
+// sentinel is what the sentinel file holds: the record, and the files the
+// directory has to hold to be complete.
 type sentinel struct {
-	Digest string   `json:"digest"`
-	Files  []string `json:"files"`
+	Record
+	Files []string `json:"files"`
 }
 
 // Store reads and writes per-resource cache directories. Resource names are
@@ -102,7 +123,7 @@ func (s Store) State(cachePath, name string) (State, error) {
 // Every read honours ctx, inside an entry too: an entry can be hundreds of
 // megabytes, and nothing else watches ctx when the source is a local archive.
 func (s Store) Extract(
-	ctx context.Context, cachePath, name, digest string, content io.Reader,
+	ctx context.Context, cachePath, name string, rec Record, content io.Reader,
 ) (err error) {
 	tmp, err := os.MkdirTemp(cachePath, "."+name+".tmp-")
 	if err != nil {
@@ -126,7 +147,7 @@ func (s Store) Extract(
 		// Identity, not errors.Is. archive/tar ends an archive with io.EOF
 		// itself, while a failure upstream can wrap one: a registry closing
 		// the connection before a layer comes back as Get "...": EOF. Taken
-		// for the end, it published whatever the earlier layers held as a
+		// for the end, it would publish whatever the earlier layers held as a
 		// complete resource, the rest silently missing.
 		if rerr == io.EOF { //nolint:errorlint // see above: only the unwrapped value means the end
 			break
@@ -205,7 +226,7 @@ func (s Store) Extract(
 			errors.WithDetail("the image carries no file to cache"))
 	}
 
-	data, err := json.Marshal(sentinel{Digest: digest, Files: files})
+	data, err := json.Marshal(sentinel{Record: rec, Files: files})
 	if err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("encoding the sentinel"))

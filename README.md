@@ -213,10 +213,11 @@ docker push registry.example.com/my-boot-cache-worker:1.0.0
 
 Four things the agent expects:
 
-- **A `linux/amd64` image.** It resolves the reference for that platform and
-  no other, which is also why the build above pins it. An archive read by
-  `imagecachectl` is checked the same way, so an image saved on an arm64
-  machine is refused instead of filling an x86_64 node's cache.
+- **A `linux/amd64` image.** The agent refuses an image whose configuration
+  declares another platform, from an index or a single manifest, which is
+  also why the build above pins it. An archive read by `imagecachectl` is
+  checked the same way, so an image saved on an arm64 machine is refused
+  instead of filling an x86_64 node's cache.
 - **Unique file names.** Every file lands flat, under its base name, so two
   files called `app.tar`, in different directories or written by different
   layers, fail the extraction instead of overwriting each other.

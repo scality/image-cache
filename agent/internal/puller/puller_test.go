@@ -236,6 +236,34 @@ func TestRemotePullNoMatchingPlatform(t *testing.T) {
 	}
 }
 
+// WithPlatform only filters an index. A tag pointing at a single arm64
+// manifest must be refused all the same.
+func TestRemotePullRefusesASingleManifestOfAnotherPlatform(t *testing.T) {
+	srv := httptest.NewServer(registry.New())
+	defer srv.Close()
+
+	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(arm64Arch)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := strings.TrimPrefix(srv.URL, "http://") + workerRefPath
+	if err := crane.Push(withPlatform(t, img, arm64Arch, linuxOS), ref); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = (Remote{}).Pull(context.Background(), ref)
+	if !errors.Is(err, ErrPull) {
+		t.Fatalf("Pull: err = %v, want ErrPull", err)
+	}
+	if !strings.Contains(err.Error(), "arm64") || !strings.Contains(err.Error(), "amd64") {
+		t.Errorf("err = %v, want both architectures named", err)
+	}
+	// Adoption resolves the source without pulling it.
+	if _, err := (Remote{}).Resolve(context.Background(), ref); !errors.Is(err, ErrPull) {
+		t.Errorf("Resolve: err = %v, want ErrPull", err)
+	}
+}
+
 func TestRemotePullContextCancelled(t *testing.T) {
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
@@ -367,11 +395,8 @@ func TestTarballPullContextCancelled(t *testing.T) {
 	}
 }
 
-// Remote pins linux/amd64 when it resolves a reference. An archive carries
-// whatever it was saved from, so the same check belongs here: without it, an
-// image built on an arm64 machine fills the cache of an x86_64 node, the
-// sentinel says the resource is complete, and nothing further down looks at
-// the architecture again.
+// An archive carries whatever it was saved from, and is checked like a pulled
+// image.
 func TestTarballPullRefusesAnotherPlatform(t *testing.T) {
 	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
 	if err != nil {

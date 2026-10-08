@@ -90,10 +90,10 @@ The architecture is the one exception. Every part targets `linux/amd64`: the
 preload service imports with that platform by default, the agent image is
 built for it alone, and the DaemonSet carries a matching `nodeSelector` so it
 stays off nodes it could not run on. The command's package is built for
-x86_64 alone, and the command refuses an archive that declares another
-platform. A node selected by an `ImageCache` but not
-by the agent never reports a label, so a mixed cluster needs a selector that
-says so.
+x86_64 alone. The agent and the command refuse an image that declares
+another platform, from a registry or an archive. A node selected by an
+`ImageCache` but not by the agent never reports a label, so a mixed cluster
+needs a selector that says so.
 
 Out of scope, deliberately:
 

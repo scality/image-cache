@@ -198,34 +198,16 @@ func (Tarball) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 		return nil, Image{}, errors.Wrap(ErrPull, errors.CausedBy(err),
 			errors.WithProperty("source", ref))
 	}
-	// Remote pins the platform when it resolves the reference; an archive
-	// carries whatever it was saved from. Checking here keeps the two
-	// implementations of this interface interchangeable, which is what the
-	// caller relies on when it picks one by the shape of the source. Without
-	// it, an image saved on an arm64 machine fills the cache of an x86_64
-	// node, the sentinel says the resource is complete, and nothing further
-	// down looks at the architecture again.
-	cfg, err := img.ConfigFile()
-	if err != nil {
-		return nil, Image{}, errors.Wrap(ErrPull, errors.CausedBy(err),
-			errors.WithDetail("reading the image configuration"),
-			errors.WithProperty("source", ref))
-	}
-	// Only a declared mismatch is refused. A carrier image holds nothing but
-	// tarballs, and the tool that builds one may record no platform at all,
-	// which contradicts nothing.
-	if (cfg.OS != "" && cfg.OS != platform.OS) ||
-		(cfg.Architecture != "" && cfg.Architecture != platform.Architecture) {
-		return nil, Image{}, errors.Wrap(ErrPull,
-			errors.WithDetail(fmt.Sprintf("the archive carries a %s/%s image, and the cache is filled for %s/%s",
-				cfg.OS, cfg.Architecture, platform.OS, platform.Architecture)),
-			errors.WithProperty("source", ref))
-	}
 	id, err := identify(img, ref)
 	return img, id, err
 }
 
-// identify reads the manifest digest and the layers' diff IDs.
+// identify reads the manifest digest and the layers' diff IDs, and refuses an
+// image built for another platform. remote.WithPlatform only picks a child out
+// of an index, and an archive carries whatever it was saved from. Without the
+// check, an arm64 image fills the cache of an x86_64 node, the sentinel says
+// the resource is complete, and nothing further down looks at the
+// architecture again.
 func identify(img v1.Image, ref string) (Image, error) {
 	digest, err := img.Digest()
 	if err != nil {
@@ -236,6 +218,16 @@ func identify(img v1.Image, ref string) (Image, error) {
 	if err != nil {
 		return Image{}, errors.Wrap(ErrPull, errors.CausedBy(err),
 			errors.WithDetail("reading the image configuration"), errors.WithProperty("source", ref))
+	}
+	// Only a declared mismatch is refused. A carrier image holds nothing but
+	// tarballs, and the tool that builds one may record no platform at all,
+	// which contradicts nothing.
+	if (cfg.OS != "" && cfg.OS != platform.OS) ||
+		(cfg.Architecture != "" && cfg.Architecture != platform.Architecture) {
+		return Image{}, errors.Wrap(ErrPull,
+			errors.WithDetail(fmt.Sprintf("the image is %s/%s, and the cache is filled for %s/%s",
+				cfg.OS, cfg.Architecture, platform.OS, platform.Architecture)),
+			errors.WithProperty("source", ref))
 	}
 	layers := make([]string, 0, len(cfg.RootFS.DiffIDs))
 	for _, d := range cfg.RootFS.DiffIDs {

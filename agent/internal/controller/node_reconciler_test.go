@@ -24,6 +24,7 @@ import (
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 	"github.com/scality/image-cache/agent/internal/cache"
+	"github.com/scality/image-cache/agent/internal/puller"
 )
 
 // Resource names, labels, and paths used by the tests added below.
@@ -68,16 +69,26 @@ const (
 // image.
 type fakePuller struct{ fail atomic.Bool }
 
-func (f *fakePuller) Pull(context.Context, string) (io.ReadCloser, string, error) {
+func (f *fakePuller) Pull(context.Context, string) (io.ReadCloser, puller.Image, error) {
 	if f.fail.Load() {
-		return nil, "", errors.New("registry unreachable")
+		return nil, puller.Image{}, errors.New("registry unreachable")
 	}
 	buf := &bytes.Buffer{}
 	tw := tar.NewWriter(buf)
 	_ = tw.WriteHeader(&tar.Header{Name: "images/etcd.tar", Mode: 0o644, Size: 4})
 	_, _ = tw.Write([]byte("etcd"))
 	_ = tw.Close()
-	return io.NopCloser(buf), "sha256:fake", nil
+	return io.NopCloser(buf), fakeImage, nil
+}
+
+// fakeImage is what every source resolves to in these tests.
+var fakeImage = puller.Image{Digest: "sha256:fake", Layers: []string{"sha256:fakelayer"}}
+
+func (f *fakePuller) Resolve(context.Context, string) (puller.Image, error) {
+	if f.fail.Load() {
+		return puller.Image{}, errors.New("registry unreachable")
+	}
+	return fakeImage, nil
 }
 
 var _ = Describe("NodeReconciler", Ordered, func() {

@@ -60,7 +60,7 @@ func Fill(
 	ctx context.Context, store cache.Store, p puller.Puller,
 	cachePath, name, source string, onClose func(error),
 ) error {
-	content, digest, err := p.Pull(ctx, source)
+	content, img, err := p.Pull(ctx, source)
 	if err != nil {
 		return err
 	}
@@ -70,7 +70,7 @@ func Fill(
 			onClose(cerr)
 		}
 	}()
-	if err := store.Extract(ctx, cachePath, name, digest, content); err != nil {
+	if err := store.Extract(ctx, cachePath, name, img.Digest, content); err != nil {
 		return err
 	}
 	extracted = true

@@ -116,4 +116,4 @@ Do not scaffold them back in:
   that looks healthy and silently stopped watching.
 - Garbage collection removes what no resource keeps, except what "Cache
   layout" in `DESIGN.md` lists. Never collect a directory another writer
-  seeded.
+  seeded before a resource adopts it.

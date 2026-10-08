@@ -53,7 +53,7 @@ const lostFound = "lost+found"
 
 // OwnerAgent is the owner the agent writes in a sentinel. Another owner, or
 // none, means another writer seeded the directory: garbage collection leaves
-// it.
+// it until a resource adopts it.
 const OwnerAgent = "image-cache-agent"
 
 // Record is what the sentinel remembers about a directory's content, beyond
@@ -113,6 +113,65 @@ func (s Store) State(cachePath, name string) (State, error) {
 		}
 	}
 	return Complete, nil
+}
+
+// ErrAdopt covers taking over a directory another writer seeded.
+var ErrAdopt = errors.New("adopting a seeded cache directory failed")
+
+// ReadRecord reads the record from the sentinel of the named resource's
+// directory. It is meant for a directory State reported Complete.
+func (s Store) ReadRecord(cachePath, name string) (Record, error) {
+	sn, err := s.readSentinel(cachePath, name)
+	if err != nil {
+		return Record{}, err
+	}
+	return sn.Record, nil
+}
+
+// Adopt makes the agent the owner of a directory another writer seeded,
+// leaving its content and the rest of the sentinel as they are. From then on
+// the directory is the agent's to refresh and to collect.
+//
+// The sentinel is rewritten through a temporary file renamed over it, so a
+// crash leaves either the old owner or the new one, never a sentinel half
+// written, which State would read as an incomplete resource to pull again.
+func (s Store) Adopt(cachePath, name string) error {
+	sn, err := s.readSentinel(cachePath, name)
+	if err != nil {
+		return errors.Wrap(ErrAdopt, errors.CausedBy(err), errors.WithProperty("resource", name))
+	}
+	sn.Owner = OwnerAgent
+	data, err := json.Marshal(sn)
+	if err != nil {
+		return errors.Wrap(ErrAdopt, errors.CausedBy(err), errors.WithProperty("resource", name))
+	}
+	path := filepath.Join(s.dir(cachePath, name), sentinelName)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return errors.Wrap(ErrAdopt, errors.CausedBy(err),
+			errors.WithDetail("writing the new sentinel"), errors.WithProperty("resource", name))
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return utilerrors.NewAggregate([]error{
+			errors.Wrap(ErrAdopt, errors.CausedBy(err),
+				errors.WithDetail("replacing the sentinel"), errors.WithProperty("resource", name)),
+			os.Remove(tmp),
+		})
+	}
+	return nil
+}
+
+func (s Store) readSentinel(cachePath, name string) (sentinel, error) {
+	data, err := os.ReadFile(filepath.Join(s.dir(cachePath, name), sentinelName))
+	if err != nil {
+		return sentinel{}, errors.Wrap(ErrState, errors.CausedBy(err), errors.WithProperty("resource", name))
+	}
+	var sn sentinel
+	if err := json.Unmarshal(data, &sn); err != nil {
+		return sentinel{}, errors.Wrap(ErrState, errors.CausedBy(err),
+			errors.WithDetail("the sentinel does not parse"), errors.WithProperty("resource", name))
+	}
+	return sn, nil
 }
 
 // Extract writes the regular files of the tar stream into the resource
@@ -325,7 +384,7 @@ func (s Store) SweepTemporaries(cachePath, name string) ([]string, error) {
 }
 
 // seeded reports whether a writer other than the agent wrote dir: content
-// waiting for its resource. A missing sentinel or one that does
+// waiting for the resource that adopts it. A missing sentinel or one that does
 // not parse is not seeded. A sentinel that cannot be read is an error: the
 // directory may be seeded, and removing it would lose content an air-gapped
 // node cannot fetch again.

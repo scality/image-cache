@@ -183,13 +183,12 @@ as root, so a wrong name or cache path that lands on a directory the store did
 not write stops rather than emptying it. Remove that directory by hand if you
 meant it.
 
-One thing to get right the first time: nothing checks that what you imported
-under a name is what the resource of that name will ask for. Seed the wrong
-image and the agent adopts it, labels the node synced and never pulls the
-right one. Removing the directory by hand is the way back.
-
-A directory imported under a name no resource ever carries stays until you
-remove it.
+Before it adopts a directory, the agent checks that it holds the image the
+resource asks for, by comparing layers. It reads no layer to do so. The same
+image is taken over without a pull, another image is replaced, and an
+unreachable source leaves the directory as it is. See
+[agent/DESIGN.md](agent/DESIGN.md#adopting-a-seeded-directory). A directory
+imported under a name no resource ever carries stays until you remove it.
 
 ### Building a cache image
 

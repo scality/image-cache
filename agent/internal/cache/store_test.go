@@ -684,6 +684,50 @@ func TestGCLeavesADirectoryAnotherWriterOwns(t *testing.T) {
 	}
 }
 
+// Adopting a seeded directory changes its owner and nothing else: the files,
+// what the sentinel lists, and where the content came from stay as the
+// command wrote them, and the directory still reads complete.
+func TestAdoptOnlyChangesTheOwner(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	seeded := Record{Owner: otherOwner, Source: "/mnt/iso/boot-cache.tar", Digest: "sha256:manifest", Layers: []string{"sha256:layer"}}
+	if err := s.Extract(t.Context(), dir, "c", seeded, tarStream(t, map[string]string{testTar: "1"})); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Adopt(dir, "c"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ReadRecord(dir, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := seeded
+	want.Owner = OwnerAgent
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("record = %+v, want %+v", got, want)
+	}
+	if st, err := s.State(dir, "c"); err != nil || st != Complete {
+		t.Errorf("state = %v, %v; want Complete", st, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "c", testTar)); err != nil || string(data) != "1" {
+		t.Errorf("content = %q, %v; want it untouched", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "c", sentinelName+".tmp")); !os.IsNotExist(err) {
+		t.Errorf("the temporary sentinel is left behind: %v", err)
+	}
+}
+
+// There is nothing to adopt, or to read, where no sentinel is.
+func TestAdoptAndReadRecordNeedASentinel(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	if err := s.Adopt(dir, "missing"); !errors.Is(err, ErrAdopt) {
+		t.Errorf("Adopt = %v, want ErrAdopt", err)
+	}
+	if _, err := s.ReadRecord(dir, "missing"); !errors.Is(err, ErrState) {
+		t.Errorf("ReadRecord = %v, want ErrState", err)
+	}
+}
+
 // A sentinel that cannot be read may still name another writer: the directory
 // is kept, and the failure reported, rather than removed on a doubt.
 func TestGCKeepsADirectoryWhoseSentinelCannotBeRead(t *testing.T) {

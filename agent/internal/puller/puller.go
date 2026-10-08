@@ -40,8 +40,8 @@ type Image struct {
 	// a registry and through a docker archive carries two of them.
 	Digest string
 	// Layers are the diff IDs of the image's layers, in order: the digests
-	// of the uncompressed layers, so they do not depend on how the image is
-	// stored: two sources are compared by them.
+	// of the uncompressed layers. Two sources are compared by them, see
+	// "Adopting a seeded directory" in agent/DESIGN.md.
 	Layers []string
 }
 

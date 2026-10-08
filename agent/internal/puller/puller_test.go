@@ -978,7 +978,8 @@ func (r *reserialized) Digest() (v1.Hash, error) {
 }
 
 // Both pullers report the same diff IDs for the same image, even when the
-// archive stores its configuration in another key order.
+// archive stores its configuration in another key order. See "Adopting a
+// seeded directory" in agent/DESIGN.md.
 func TestBothPullersAgreeOnTheLayers(t *testing.T) {
 	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
 	if err != nil {

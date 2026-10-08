@@ -54,13 +54,14 @@ labels:
   image-cache.scality.com/worker-134-0-0: synced   # or: pending
 ```
 
-- `pending`: the cache content for this resource is not (yet) on disk.
+- `pending`: the cache content for this resource is not (yet) on disk, or is
+  on disk but not yet checked against `spec.source`.
 - `synced`: the tarballs are fully extracted under the resource's cache
   directory.
 
 If a resource stays `pending` longer than expected, look at the events the
-agent records on it. Sync failures and missing cache-path mounts are
-reported there. The label keeps its two values:
+agent records on it. Sync failures, failed checks of a seeded directory and
+missing cache-path mounts are reported there. The label keeps its two values:
 
 ```console
 kubectl describe imagecache worker-134-0-0
@@ -110,9 +111,8 @@ complete and records who wrote it:
   - regular flat files (a link goes): provisioning writes them, and the
     preload service restores from them;
   - a directory whose sentinel names another writer, `imagecachectl` for
-    instance (see the one-shot command below): at install the agent can land
-    before the resources that name it, and collecting it would pull the same
-    gigabyte again. A sentinel that names no owner counts as another writer;
+    instance, until a resource adopts it (see the one-shot command below). A
+    sentinel that names no owner counts as another writer;
   - `lost+found`, when the cache path is a filesystem of its own;
   - a directory whose sentinel cannot be read. It may be seeded, so it stays,
     and the pass fails until the sentinel can be read.
@@ -149,9 +149,12 @@ A crash before the rename leaves a hidden `.<name>.tmp-*` directory next to
 the target; garbage collection removes it on a later pass, the same as an
 orphaned resource directory.
 
-A resource whose directory is complete is never re-pulled: `spec.source` is
-effectively immutable once synced. Publishing new content means creating a
-new ImageCache (the name carries the version), not editing an existing one.
+A resource whose directory is complete and written by the agent is never
+re-pulled: `spec.source` is effectively immutable once synced. A directory
+`imagecachectl` seeded is checked once against `spec.source` before the agent
+takes it over, see the one-shot command below. Publishing new content means
+creating a new ImageCache (the name carries the version), not editing an
+existing one.
 
 ## Reconciliation model
 
@@ -183,9 +186,12 @@ One pass:
 
 1. Compute `desired`: the ImageCache resources whose `nodeSelector` matches
    the labels of the node named by `NODE_NAME` (downward API).
-2. For each desired resource: if its directory is complete, done. Otherwise
-   set the label to `pending`, pull `spec.source` (linux/amd64), extract
-   atomically, then set the label to `synced`.
+2. For each desired resource: if its directory is complete and the agent
+   wrote it, done. If another writer wrote it (`imagecachectl` for
+   instance), set the label to `pending` and check that it holds the
+   resource's image before adopting it (see the one-shot command below).
+   Otherwise set the label to `pending`, pull `spec.source` (linux/amd64),
+   extract atomically, then set the label to `synced`.
 3. Garbage-collect: in the cache path, delete what no desired resource
    claims, within the ownership rules above.
 4. Remove `image-cache.scality.com/*` node labels that no desired resource
@@ -254,8 +260,8 @@ Three consequences worth stating:
 
 - **The name is the caller's.** It becomes the resource directory, and the
   agent recognises a resource by it. Given the name the `ImageCache` will
-  carry, the agent finds the directory complete and takes it as it is.
-  Given any other name, the directory stays:
+  carry, the agent finds the directory complete and adopts it once it has
+  checked the content (below). Given any other name, the directory stays:
   garbage collection leaves what the command wrote, and no resource claims
   it, so it is the caller's to remove. The command validates the name as a
   DNS-1123 subdomain, the rule the API server applies to the resource, so the
@@ -271,6 +277,39 @@ Three consequences worth stating:
   registry, whatever the source now points at. Keeping a node up to date is
   the agent's job, and a command that ran again on every convergence would be
   a second, weaker one.
+
+### Adopting a seeded directory
+
+The sentinel names its writer, so the agent tells what the command seeded from
+what it wrote itself. Garbage collection leaves the command's directories
+alone: at install the agent can land before the resources that name them, and
+collecting a seeded cache would pull the same gigabyte again.
+
+A resource that claims a seeded directory keeps its node `pending` until the
+agent has checked the content. The agent resolves `spec.source`, which reads
+the manifest and the configuration and never a layer. It compares the diff
+IDs of the layers, in order, with the ones the command recorded:
+
+- the same image: the agent rewrites the owner in the sentinel, through a
+  temporary file renamed over it, and labels the node `synced` without
+  pulling. From then on the directory is the agent's, to refresh and to
+  collect.
+- another image: the directory is replaced like any other that does not hold
+  what its resource asks for.
+- the source cannot be resolved: the directory is left as it is, and the next
+  pass tries again.
+
+The diff IDs identify the content because the cache holds nothing else: the
+files come from the layers. They are the digests of the uncompressed layers,
+so they do not depend on how the image is stored. The other identities do:
+
+- the source string: the first node is seeded from an archive path and its
+  resource names a registry reference. The string also changes with the
+  registry endpoint.
+- the manifest digest: it changes when an image is saved or pushed.
+- the configuration digest: a format conversion, Docker to OCI for example,
+  writes the configuration out again in another key order. The content is
+  the same, the digest is not.
 
 ## Container image and deployment
 
@@ -322,8 +361,8 @@ The agent never writes ImageCache resources (no status, no finalizers).
 - Puller tests against go-containerregistry's in-memory registry, pulling a
   forged image whose layers contain tarballs.
 - envtest: the full reconciler with a fake puller, from resource lifecycle to
-  node labels and on-disk state: failure paths and entries the agent did
-  not write.
+  node labels and on-disk state: failure paths, adoption of a seeded
+  directory, and entries the agent did not write.
 - A minimal kind-based e2e smoke test, with no registry infrastructure: CRD
   installed, agent running, node labelled `pending` for a resource with an
   unreachable source, label cleared on deletion, and garbage collection of

@@ -66,6 +66,12 @@ const (
 
 	// strayNodeName backs the "stray cache entries" suite below.
 	strayNodeName = "stray-node"
+
+	// lostNodeName, lostLabelKey and lostResourceName back the "lost
+	// sentinel" suite below.
+	lostNodeName     = "lost-node"
+	lostLabelKey     = "lostsentinel"
+	lostResourceName = "lost-1-0-0"
 )
 
 // fakePuller is a mutable, race-safe puller.Puller: tests flip fail to
@@ -474,6 +480,61 @@ var _ = Describe("startup pass", func() {
 			return hasNodeLabel(ctx, staleNodeKey, "gone-1-0-0")
 		}, 10*time.Second).Should(BeFalse())
 	})
+})
+
+// What sits at a resource's path with no sentinel, a directory whose sentinel
+// was deleted by hand or a plain file, is replaced in a pass that does not
+// fail, rather than leaving the resource pending for good.
+var _ = Describe("lost sentinel", func() {
+	for what, place := range map[string]func(res string){
+		"a directory": func(res string) {
+			Expect(os.MkdirAll(res, 0o755)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(res, etcdTarName), []byte("old"), 0o644)).To(Succeed())
+		},
+		"a file": func(res string) {
+			Expect(os.WriteFile(res, []byte("old"), 0o644)).To(Succeed())
+		},
+	} {
+		It("fills "+what+" again", func() {
+			ctx := context.Background()
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+				Name:   lostNodeName,
+				Labels: map[string]string{lostLabelKey: "yes"},
+			}}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(context.Background(), node)).To(Succeed())
+			})
+			ic := &imagecachev1alpha1.ImageCache{
+				ObjectMeta: metav1.ObjectMeta{Name: lostResourceName},
+				Spec: imagecachev1alpha1.ImageCacheSpec{
+					NodeSelector: map[string]string{lostLabelKey: "yes"},
+					Source:       "registry.example.com/boot-cache-lost:1.0.0",
+				},
+			}
+			Expect(k8sClient.Create(ctx, ic)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(context.Background(), ic)).To(Succeed())
+			})
+			dir := GinkgoT().TempDir()
+			res := filepath.Join(dir, lostResourceName)
+			place(res)
+
+			r := &NodeReconciler{
+				Client:    k8sClient,
+				Recorder:  events.NewFakeRecorder(10),
+				NodeName:  lostNodeName,
+				CachePath: dir,
+				Puller:    &fakePuller{},
+				Resync:    time.Hour,
+			}
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: lostNodeName}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.ReadFile(filepath.Join(res, etcdTarName))).To(Equal([]byte("etcd")))
+			Expect(filepath.Join(res, ".image-cache-agent.json")).To(BeARegularFile())
+			Expect(nodeLabel(ctx, types.NamespacedName{Name: lostNodeName}, lostResourceName)).To(Equal(StatusSynced))
+		})
+	}
 })
 
 // An entry no resource keeps goes when it is not a seeded directory: no

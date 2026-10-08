@@ -130,12 +130,13 @@ func TestFillReportsAFailedCloseOnlyAfterASuccess(t *testing.T) {
 // A directory the store cannot replace is refused before the pull.
 func TestFillRefusesAnUnreplaceableDirectoryBeforePulling(t *testing.T) {
 	dir := t.TempDir()
+	// Only the agent replaces a directory with no sentinel.
 	if err := os.MkdirAll(filepath.Join(dir, resource), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	p := &stubPuller{entries: map[string]string{"a.tar": "a"}}
 
-	err := Fill(t.Context(), cache.Store{}, p, dir, resource, "ref", cache.OwnerAgent, nil)
+	err := Fill(t.Context(), cache.Store{}, p, dir, resource, "ref", "imagecachectl", nil)
 	if !errors.Is(err, cache.ErrExtract) {
 		t.Fatalf("err = %v, want cache.ErrExtract", err)
 	}

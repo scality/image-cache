@@ -120,11 +120,11 @@ complete and records who wrote it:
   Give `--cache-path` a directory of its own: anything else there is
   removed.
 - **Completeness**: the sentinel lists the expected file names, so a manually
-  deleted tarball is detected and the directory is extracted again. A
-  directory without a sentinel was not written by the store, since it
-  extracts in a hidden temporary: it is never replaced (see the one-shot
-  command below). The agent refuses it too: its resource stays `pending`,
-  with a `SyncFailed` event, until someone removes the directory.
+  deleted tarball is detected and the directory is extracted again. Whatever
+  sits at a resource's path with no sentinel, a directory whose sentinel was
+  deleted by hand for instance, is replaced by the agent, which owns the cache
+  path. A link goes, not what it points to. The one-shot command never
+  replaces it (see below).
 - **Traceability**: the sentinel records who wrote the directory, the source
   it was read from, the manifest digest and the diff IDs of the image's
   layers.
@@ -267,8 +267,9 @@ Three consequences worth stating:
   DNS-1123 subdomain, the rule the API server applies to the resource, so the
   two cannot disagree on what a name is.
 - **It replaces only what the store wrote.** The swap that publishes a
-  resource removes whatever is at the destination first, so it refuses a
-  directory that does not bear the sentinel. A name is not a claim on what
+  resource removes whatever is at the destination first, so the command
+  refuses any directory that does not bear the sentinel (the agent's one
+  exception is under Completeness). A name is not a claim on what
   happens to sit under it: without the check, a resource named after a
   neighbour of the cache path is an `rm -rf` of somebody else's data, run as
   root.

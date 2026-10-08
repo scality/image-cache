@@ -436,15 +436,14 @@ func TestACachePathThatIsNotADirectoryIsNamed(t *testing.T) {
 	}
 }
 
-// The store refuses to replace what it did not write, and the command says so
-// rather than reporting success over content it left alone.
+// The command never replaces a directory with no sentinel, which the agent
+// would: it says so rather than reporting success over content it left alone.
 func TestImportRefusesADirectoryItDidNotWrite(t *testing.T) {
 	cacheDir := t.TempDir()
-	foreign := filepath.Join(cacheDir, resourceName, "storage")
-	if err := os.MkdirAll(foreign, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cacheDir, resourceName), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	data := filepath.Join(foreign, "data.db")
+	data := filepath.Join(cacheDir, resourceName, "old.tar")
 	if err := os.WriteFile(data, []byte("not ours"), 0o600); err != nil {
 		t.Fatal(err)
 	}

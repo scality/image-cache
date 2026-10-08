@@ -375,6 +375,18 @@ func TestState(t *testing.T) {
 	if st, _ := s.State(dir, "x"); st != Incomplete {
 		t.Errorf("missing listed file: state = %v, want Incomplete", st)
 	}
+	// What is not a directory holds no resource, and is no error either.
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("f"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("loop", filepath.Join(dir, "loop")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"file", "loop"} {
+		if st, err := s.State(dir, name); err != nil || st != Incomplete {
+			t.Errorf("%s: state = %v, err = %v, want Incomplete", name, st, err)
+		}
+	}
 }
 
 // Garbage collection removes the agent's directories and the interrupted
@@ -717,6 +729,90 @@ func TestAdoptOnlyChangesTheOwner(t *testing.T) {
 	}
 }
 
+// What sits at a resource's path with no sentinel, the sentinel deleted by
+// hand for instance, is replaced by the agent and left alone by any other
+// writer. A link goes, not what it points to.
+func TestExtractReplacesWhatHasNoSentinelOnlyForTheAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		owner    string
+		place    func(t *testing.T, res string)
+		replaced bool
+	}{
+		{"agent, a directory", OwnerAgent, placeDir, true},
+		{"agent, a link", OwnerAgent, placeLink, true},
+		{"agent, a file", OwnerAgent, placeFile, true},
+		{"another writer, a file", otherOwner, placeFile, false},
+		{"another writer, a directory", otherOwner, placeDir, false},
+		{"another writer, a link", otherOwner, placeLink, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, s := t.TempDir(), Store{}
+			res := filepath.Join(dir, "worker-1-0-0")
+			tc.place(t, res)
+
+			err := s.Extract(t.Context(), dir, "worker-1-0-0", Record{Digest: "d", Owner: tc.owner},
+				tarStream(t, map[string]string{testTar: "new"}))
+			got, _ := os.ReadFile(filepath.Join(res, testTar))
+			if tc.replaced {
+				if err != nil || string(got) != "new" {
+					t.Errorf("err = %v, content = %q; want the path replaced", err, got)
+				}
+			} else if !errors.Is(err, ErrExtract) || !strings.Contains(err.Error(), "left alone") {
+				t.Errorf("err = %v, want ErrExtract leaving the path alone", err)
+			}
+			if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "outside-"+filepath.Base(dir), "data")); err != nil {
+				t.Errorf("what the link points to was touched: %v", err)
+			}
+		})
+	}
+}
+
+// placeDir puts a directory with no sentinel at res, holding another file and
+// a subdirectory.
+func placeDir(t *testing.T, res string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(res, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(res, "Packages"), []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	placeOutside(t, res)
+}
+
+// placeLink puts at res a link to a directory outside the cache path.
+func placeLink(t *testing.T, res string) {
+	t.Helper()
+	if err := os.Symlink(placeOutside(t, res), res); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// placeFile puts a regular file at res.
+func placeFile(t *testing.T, res string) {
+	t.Helper()
+	if err := os.WriteFile(res, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	placeOutside(t, res)
+}
+
+// placeOutside writes data in a directory next to the cache path of res, and
+// returns that directory.
+func placeOutside(t *testing.T, res string) string {
+	t.Helper()
+	dir := filepath.Dir(res)
+	outside := filepath.Join(filepath.Dir(dir), "outside-"+filepath.Base(dir))
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "data"), []byte("d"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return outside
+}
+
 // There is nothing to adopt, or to read, where no sentinel is.
 func TestAdoptAndReadRecordNeedASentinel(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
@@ -746,7 +842,7 @@ func TestReplaceableTellsAnUnreadableSentinelFromAMissingOne(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(res, 0o755) })
 
-	err := s.Replaceable(dir, "c")
+	err := s.Replaceable(dir, "c", OwnerAgent)
 	if !errors.Is(err, ErrExtract) || !errors.Is(err, os.ErrPermission) {
 		t.Errorf("err = %v, want ErrExtract caused by a permission error", err)
 	}

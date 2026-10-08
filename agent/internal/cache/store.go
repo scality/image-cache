@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/scality/go-errors"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -99,6 +100,8 @@ func (s Store) State(cachePath, name string) (State, error) {
 				errors.WithProperty("resource", name))
 		}
 		return Incomplete, nil
+	case noDirectory(err):
+		return Incomplete, nil
 	case err != nil:
 		return Absent, errors.Wrap(ErrState, errors.CausedBy(err),
 			errors.WithProperty("resource", name))
@@ -113,6 +116,13 @@ func (s Store) State(cachePath, name string) (State, error) {
 		}
 	}
 	return Complete, nil
+}
+
+// noDirectory reports whether err, from a path under a resource's directory,
+// says that what sits there is not a directory: a file, or a link loop. That
+// holds no resource, the same as a directory with no sentinel.
+func noDirectory(err error) bool {
+	return errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP)
 }
 
 // ErrAdopt covers taking over a directory another writer seeded.
@@ -299,7 +309,7 @@ func (s Store) Extract(
 			errors.WithDetail("writing the sentinel"))
 	}
 	final := s.dir(cachePath, name)
-	if err = s.replaceable(final, name); err != nil {
+	if err = s.replaceable(final, name, rec.Owner); err != nil {
 		return err
 	}
 	if err = os.RemoveAll(final); err != nil {
@@ -329,28 +339,35 @@ func entryKind(flag byte) string {
 	}
 }
 
-// Replaceable reports whether an extraction of the named resource may replace
-// what is already in its directory. Extract checks it again at the swap; a
-// caller asks first so that it does not pull an image it could not publish.
-func (s Store) Replaceable(cachePath, name string) error {
-	return s.replaceable(s.dir(cachePath, name), name)
+// Replaceable reports whether an extraction of the named resource, written by
+// owner, may replace what is already in its directory. Extract checks it
+// again at the swap; a caller asks first so that it does not pull an image it
+// could not publish.
+func (s Store) Replaceable(cachePath, name, owner string) error {
+	return s.replaceable(s.dir(cachePath, name), name, owner)
 }
 
-// replaceable reports whether the swap may remove what is already at final.
-// Only a directory bearing the sentinel may be: a name is not a claim on
-// whatever happens to sit under it. Without this, a resource named after a
-// neighbour of the cache path turns the swap into an rm -rf of somebody
-// else's data.
-func (s Store) replaceable(final, name string) error {
-	if _, err := os.Stat(final); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
+// replaceable reports whether the swap may remove what is at final. A
+// directory with a sentinel always goes, whoever wrote it. Anything else goes
+// only for the agent, which owns the cache path, unless a sentinel is there
+// but cannot be read: the directory may be seeded.
+func (s Store) replaceable(final, name, owner string) error {
+	info, err := os.Lstat(final)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("looking at the directory to replace"),
 			errors.WithProperty("resource", name))
 	}
-	_, err := os.Stat(filepath.Join(final, sentinelName))
+	if owner == OwnerAgent && !info.IsDir() {
+		return nil
+	}
+	_, err = os.Stat(filepath.Join(final, sentinelName))
+	if noDirectory(err) {
+		err = os.ErrNotExist
+	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		// Unreadable is not absent: a permission error here points at who
 		// owns the directory, not at what it holds.
@@ -359,14 +376,14 @@ func (s Store) replaceable(final, name string) error {
 			errors.WithProperty("resource", name),
 			errors.WithProperty("directory", final))
 	}
-	if err != nil {
-		return errors.Wrap(ErrExtract,
-			errors.WithDetail("what is already there was not written by this, "+
-				"so it is left alone: remove it by hand if it should go"),
-			errors.WithProperty("resource", name),
-			errors.WithProperty("directory", final))
+	if err == nil || owner == OwnerAgent {
+		return nil
 	}
-	return nil
+	return errors.Wrap(ErrExtract,
+		errors.WithDetail("what is already there was not written by this, "+
+			"so it is left alone: remove it by hand if it should go"),
+		errors.WithProperty("resource", name),
+		errors.WithProperty("directory", final))
 }
 
 // SweepTemporaries removes the hidden temporary directories a previous

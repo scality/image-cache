@@ -18,9 +18,6 @@ spec:
     - jsonPath: .spec.source
       name: Source
       type: string
-    - jsonPath: .spec.cachePath
-      name: CachePath
-      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -53,18 +50,6 @@ spec:
           spec:
             description: spec defines the desired state of ImageCache
             properties:
-              cachePath:
-                default: /var/lib/image-cache
-                description: |-
-                  cachePath is the host directory under which the tarballs are
-                  extracted, in a subdirectory named after this resource. It must
-                  start with '/' and must not contain the substring '..' anywhere
-                  (a plain substring check, not path-segment parsing).
-                pattern: ^/
-                type: string
-                x-kubernetes-validations:
-                - message: cachePath must not contain '..'
-                  rule: '!self.contains(''..'')'
               nodeSelector:
                 additionalProperties:
                   type: string

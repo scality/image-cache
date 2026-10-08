@@ -16,7 +16,7 @@ import (
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 )
 
-// FSWatcher turns filesystem changes under the cache paths into reconcile
+// FSWatcher turns filesystem changes under the cache path into reconcile
 // triggers, so manual tampering with the cache is repaired quickly.
 type FSWatcher struct {
 	mu      sync.Mutex
@@ -108,7 +108,7 @@ func (f *FSWatcher) NeedLeaderElection() bool { return false }
 // SetPaths adjusts the watched directories to exactly roots and their
 // immediate subdirectories. Watching the roots alone would report a whole
 // resource directory disappearing but not a single tarball deleted inside
-// one, because the cache layout is <cachePath>/<resource>/<files> and
+// one, because the cache layout is <cache path>/<resource>/<files> and
 // fsnotify does not watch recursively.
 //
 // Directories that do not exist yet are skipped. A resource directory created
@@ -149,9 +149,9 @@ func (f *FSWatcher) SetPaths(roots []string) {
 		case err == nil:
 			f.paths[p] = true
 		case errors.Is(err, os.ErrNotExist):
-			// The documented case: a cache path no resource has created yet,
-			// or one whose host mount is absent from this node. The next
-			// pass retries.
+			// The documented case: a cache path whose host mount is absent
+			// from this node, or a resource directory removed since the
+			// listing. The next pass retries.
 		default:
 			// Typically the inotify watch limit, which a busy node can
 			// exhaust. The node still converges on the periodic resync, but

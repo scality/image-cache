@@ -8,6 +8,8 @@ package fill
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/scality/go-errors"
 
@@ -17,6 +19,13 @@ import (
 
 // ErrCachePath covers a cache path nothing can be extracted into.
 var ErrCachePath = errors.New("the cache path is not usable")
+
+// ValidCachePath reports whether p can be a cache path: absolute, and with no
+// ".." anywhere, as a plain substring. The command runs as root, so a path
+// that could climb out is refused.
+func ValidCachePath(p string) bool {
+	return filepath.IsAbs(p) && !strings.Contains(p, "..")
+}
 
 // CheckCachePath refuses a cache path that is missing or is not a directory.
 //

@@ -109,3 +109,18 @@ func TestFillReportsAFailedCloseOnlyAfterASuccess(t *testing.T) {
 		})
 	}
 }
+
+func TestValidCachePath(t *testing.T) {
+	for p, want := range map[string]bool{
+		"/var/lib/image-cache":    true,
+		"/var/lib/image-cache/":   true,
+		"var/lib/image-cache":     false,
+		"/var/lib/../image-cache": false,
+		"/var/lib/image-cache..x": false,
+		"":                        false,
+	} {
+		if got := ValidCachePath(p); got != want {
+			t.Errorf("ValidCachePath(%q) = %v, want %v", p, got, want)
+		}
+	}
+}

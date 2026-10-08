@@ -114,9 +114,10 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 
 // validate checks what the store takes on trust. The store joins the name to
 // the cache path, and the command runs as root on a node: `..` in either
-// walks out of the cache. Both follow the rules the CRD applies, so what this
-// accepts is what an ImageCache can carry. The name also becomes a node label,
-// hence the 63 characters.
+// walks out of the cache. The name follows the rules the CRD applies, so what
+// this accepts is what an ImageCache can carry. It also becomes a node label,
+// hence the 63 characters. The cache path follows fill.ValidCachePath, like
+// the agent's.
 func validate(name, cachePath string) error {
 	problems := validation.IsDNS1123Subdomain(name)
 	if len(name) > v1alpha1.ResourceNameMax {
@@ -126,9 +127,9 @@ func validate(name, cachePath string) error {
 	if len(problems) > 0 {
 		return fmt.Errorf("--name %q is not a resource name: %s", name, strings.Join(problems, "; "))
 	}
-	if !filepath.IsAbs(cachePath) || strings.Contains(cachePath, v1alpha1.CachePathParent) {
+	if !fill.ValidCachePath(cachePath) {
 		return fmt.Errorf("--cache-path %q is not a cache path: must be absolute and must not contain %q",
-			cachePath, v1alpha1.CachePathParent)
+			cachePath, "..")
 	}
 	return nil
 }

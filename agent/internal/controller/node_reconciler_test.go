@@ -33,25 +33,24 @@ const (
 	// same boot cache do not interfere with each other (the ticket's core
 	// upgrade scenario).
 	worker133ResourceName = "worker-133-0-0"
-	// missingResourceName selects a cachePath that never exists on this
-	// node, exercising the "unmounted cache path" refusal.
+	// missingNodeName, missingPathLabelKey/Yes, and missingResourceName back
+	// the "missing cache path" suite below. Its reconciler is given a cache
+	// path that never exists, exercising the "unmounted cache path" refusal.
+	missingNodeName     = "missing-node"
+	missingPathLabelKey = "missingpath"
+	missingPathLabelYes = "yes"
 	missingResourceName = "missing-134-0-0"
-	// nonexistentCachePath is never present on the test filesystem.
-	nonexistentCachePath = "/nonexistent/image-cache-test"
-	// nonexistentParentPath is nonexistentCachePath's parent: asserting it
-	// was never created proves sync() never attempted to write under it.
-	nonexistentParentPath = "/nonexistent"
+	// nonexistentDir is never present on the test filesystem.
+	nonexistentDir = "/nonexistent/image-cache-test"
+	// nonexistentParentDir is nonexistentDir's parent: asserting it was
+	// never created proves sync() never attempted to write under it.
+	nonexistentParentDir = "/nonexistent"
 	// cachePathUnavailableReason mirrors the Event reason NodeReconciler.sync
-	// records when a resource's cache path is missing.
+	// records when the cache path is missing.
 	cachePathUnavailableReason = "CachePathUnavailable"
 	// etcdTarName is the flattened file name every fakePuller image
 	// produces.
 	etcdTarName = "etcd.tar"
-
-	// cleanPathResourceName and slashPathResourceName share one directory
-	// through two spellings of its path, one of them with a trailing slash.
-	cleanPathResourceName = "clean-path-134-0-0"
-	slashPathResourceName = "slash-path-134-0-0"
 
 	// fsNodeName, fsRepairLabelKey/Value, and fsResourceName back the
 	// dedicated "filesystem repair" suite below, which runs its own
@@ -93,7 +92,6 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
 				Source:       "registry.example.com/boot-cache-worker:134.0.0",
-				CachePath:    cacheDir,
 			},
 		}
 		Expect(k8sClient.Create(ctx, ic)).To(Succeed())
@@ -122,7 +120,6 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{zoneLabelKey: "mars"},
 				Source:       "registry.example.com/boot-cache-other:134.0.0",
-				CachePath:    cacheDir,
 			},
 		}
 		Expect(k8sClient.Create(ctx, ic)).To(Succeed())
@@ -161,7 +158,6 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
 				Source:       "registry.example.com/boot-cache-broken:134.0.0",
-				CachePath:    cacheDir,
 			},
 		}
 		Expect(k8sClient.Create(ctx, ic)).To(Succeed())
@@ -194,7 +190,6 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
 				Source:       "registry.example.com/boot-cache-worker:133.0.0",
-				CachePath:    cacheDir,
 			},
 		}
 		Expect(k8sClient.Create(ctx, older)).To(Succeed())
@@ -203,7 +198,6 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
 				Source:       "registry.example.com/boot-cache-worker:134.0.0",
-				CachePath:    cacheDir,
 			},
 		}
 		Expect(k8sClient.Create(ctx, newer)).To(Succeed())
@@ -251,107 +245,48 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 			return hasNodeLabel(ctx, nodeKey, workerResourceName)
 		}).Should(BeFalse())
 	})
-
-	It("keeps a resource pending when its cache path does not exist", func() {
-		By("creating an ImageCache whose cache path is not mounted on this node")
-		ic := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: missingResourceName},
-			Spec: imagecachev1alpha1.ImageCacheSpec{
-				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
-				Source:       "registry.example.com/boot-cache-missing:134.0.0",
-				CachePath:    nonexistentCachePath,
-			},
-		}
-		Expect(k8sClient.Create(ctx, ic)).To(Succeed())
-
-		By("waiting for the pending label")
-		Eventually(func() (string, error) {
-			return nodeLabel(ctx, nodeKey, missingResourceName)
-		}).Should(Equal(StatusPending))
-
-		By("checking it never becomes synced while the cache path is missing")
-		Consistently(func() (string, error) {
-			return nodeLabel(ctx, nodeKey, missingResourceName)
-		}, "2s").Should(Equal(StatusPending))
-
-		By("checking no directory was ever created for the unmounted path")
-		_, err := os.Stat(nonexistentParentPath)
-		Expect(os.IsNotExist(err)).To(BeTrue())
-
-		By("checking a CachePathUnavailable event was recorded for the resource")
-		Eventually(func() (bool, error) {
-			var events corev1.EventList
-			if err := k8sClient.List(ctx, &events); err != nil {
-				return false, err
-			}
-			for _, e := range events.Items {
-				if e.InvolvedObject.Name == missingResourceName && e.Reason == cachePathUnavailableReason {
-					return true, nil
-				}
-			}
-			return false, nil
-		}).Should(BeTrue())
-
-		By("cleaning up")
-		Expect(k8sClient.Delete(ctx, ic)).To(Succeed())
-		Eventually(func() (bool, error) {
-			return hasNodeLabel(ctx, nodeKey, missingResourceName)
-		}).Should(BeFalse())
-	})
-
-	It("treats two spellings of the same cache path as one directory", func() {
-		// A trailing slash passes CRD validation and names the same
-		// directory. Keyed apart, the garbage collector would scan that
-		// directory twice, once with a keep set holding the other
-		// resource only, and delete what the pass had just extracted:
-		// the two resources would re-pull each other's content forever.
-		By("creating two resources whose cache paths differ only by a trailing slash")
-		plain := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: cleanPathResourceName},
-			Spec: imagecachev1alpha1.ImageCacheSpec{
-				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
-				Source:       "registry.example.com/boot-cache-clean:134.0.0",
-				CachePath:    cacheDir,
-			},
-		}
-		Expect(k8sClient.Create(ctx, plain)).To(Succeed())
-		slashed := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: slashPathResourceName},
-			Spec: imagecachev1alpha1.ImageCacheSpec{
-				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
-				Source:       "registry.example.com/boot-cache-slash:134.0.0",
-				CachePath:    cacheDir + "/",
-			},
-		}
-		Expect(k8sClient.Create(ctx, slashed)).To(Succeed())
-
-		By("waiting for both to become synced")
-		for _, name := range []string{cleanPathResourceName, slashPathResourceName} {
-			Eventually(func() (string, error) {
-				return nodeLabel(ctx, nodeKey, name)
-			}).Should(Equal(StatusSynced))
-		}
-
-		By("checking neither is collected by the other's pass")
-		Consistently(func() error {
-			for _, name := range []string{cleanPathResourceName, slashPathResourceName} {
-				if _, err := os.Stat(filepath.Join(cacheDir, name, etcdTarName)); err != nil {
-					return err
-				}
-			}
-			return nil
-		}, "3s").Should(Succeed())
-
-		By("cleaning up")
-		Expect(k8sClient.Delete(ctx, plain)).To(Succeed())
-		Expect(k8sClient.Delete(ctx, slashed)).To(Succeed())
-		for _, name := range []string{cleanPathResourceName, slashPathResourceName} {
-			Eventually(func() (bool, error) {
-				return hasNodeLabel(ctx, nodeKey, name)
-			}).Should(BeFalse())
-		}
-	})
 })
+
+// startOwnReconciler runs r under a second manager, next to the suite's one,
+// until the spec ends. It fills in the client and the recorder, and runs r.FS
+// when there is one.
+func startOwnReconciler(r *NodeReconciler) {
+	GinkgoHelper()
+	// controller-runtime validates controller names against a
+	// process-global set (pkg/controller/name.go), not a per-manager
+	// one: the suite's manager already registered "node", so this
+	// second manager must opt out via its own (manager-scoped)
+	// SkipNameValidation. This does not touch the production
+	// controller's name or SetupWithManager.
+	skipNameValidation := true
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:  scheme.Scheme,
+		Metrics: metricsserver.Options{BindAddress: "0"},
+		Controller: config.Controller{
+			SkipNameValidation: &skipNameValidation,
+		},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	if r.FS != nil {
+		Expect(mgr.Add(r.FS)).To(Succeed())
+	}
+	r.Client = mgr.GetClient()
+	r.Recorder = mgr.GetEventRecorder("image-cache-agent-" + r.NodeName)
+	Expect(r.SetupWithManager(mgr)).To(Succeed())
+
+	mgrCtx, mgrCancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer GinkgoRecover()
+		defer close(done)
+		Expect(mgr.Start(mgrCtx)).To(Succeed())
+	}()
+	DeferCleanup(func() {
+		mgrCancel()
+		<-done
+	})
+}
 
 // Separate top-level container: it runs its own manager against a node that
 // no suite CR selects, so it does not share Ordered-block state above.
@@ -378,48 +313,90 @@ var _ = Describe("startup pass", func() {
 		})
 
 		By("starting a second manager whose reconciler converges stale-node")
-		// controller-runtime validates controller names against a
-		// process-global set (pkg/controller/name.go), not a per-manager
-		// one: the suite's manager already registered "node", so this
-		// second manager must opt out via its own (manager-scoped)
-		// SkipNameValidation. This does not touch the production
-		// controller's name or SetupWithManager.
-		skipNameValidation := true
-		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-			Scheme:  scheme.Scheme,
-			Metrics: metricsserver.Options{BindAddress: "0"},
-			Controller: config.Controller{
-				SkipNameValidation: &skipNameValidation,
-			},
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect((&NodeReconciler{
-			Client:   mgr.GetClient(),
-			Recorder: mgr.GetEventRecorder("image-cache-agent-startup-test"),
-			NodeName: staleNodeName,
-			Store:    cache.Store{},
-			Puller:   &fakePuller{},
-			FS:       nil,
-			Resync:   0,
-		}).SetupWithManager(mgr)).To(Succeed())
-
-		mgrCtx, mgrCancel := context.WithCancel(context.Background())
-		done := make(chan struct{})
-		go func() {
-			defer GinkgoRecover()
-			defer close(done)
-			Expect(mgr.Start(mgrCtx)).To(Succeed())
-		}()
-		DeferCleanup(func() {
-			mgrCancel()
-			<-done
+		startOwnReconciler(&NodeReconciler{
+			NodeName:  staleNodeName,
+			CachePath: GinkgoT().TempDir(),
+			Store:     cache.Store{},
+			Puller:    &fakePuller{},
+			Resync:    0,
 		})
 
 		By("waiting for the startup pass to remove the stale label with zero matching resources")
 		Eventually(func() (bool, error) {
 			return hasNodeLabel(ctx, staleNodeKey, "gone-1-0-0")
 		}, 10*time.Second).Should(BeFalse())
+	})
+})
+
+// Separate top-level container: the suite's reconciler uses a cache path that
+// exists, so this one runs its own manager, node and reconciler, whose cache
+// path is missing, as when the host mount does not cover it.
+var _ = Describe("missing cache path", func() {
+	It("keeps a resource pending when the cache path does not exist", func() {
+		ctx := context.Background()
+		missingNodeKey := types.NamespacedName{Name: missingNodeName}
+
+		By("creating a node dedicated to this suite")
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   missingNodeName,
+				Labels: map[string]string{missingPathLabelKey: missingPathLabelYes},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(k8sClient.Delete(context.Background(), node)).To(Succeed())
+		})
+
+		By("starting a reconciler whose cache path is not mounted on its node")
+		startOwnReconciler(&NodeReconciler{
+			NodeName:  missingNodeName,
+			CachePath: nonexistentDir,
+			Store:     cache.Store{},
+			Puller:    &fakePuller{},
+			Resync:    0,
+		})
+
+		By("creating a matching ImageCache")
+		ic := &imagecachev1alpha1.ImageCache{
+			ObjectMeta: metav1.ObjectMeta{Name: missingResourceName},
+			Spec: imagecachev1alpha1.ImageCacheSpec{
+				NodeSelector: map[string]string{missingPathLabelKey: missingPathLabelYes},
+				Source:       "registry.example.com/boot-cache-missing:134.0.0",
+			},
+		}
+		Expect(k8sClient.Create(ctx, ic)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(k8sClient.Delete(context.Background(), ic)).To(Succeed())
+		})
+
+		By("waiting for the pending label")
+		Eventually(func() (string, error) {
+			return nodeLabel(ctx, missingNodeKey, missingResourceName)
+		}).Should(Equal(StatusPending))
+
+		By("checking it never becomes synced while the cache path is missing")
+		Consistently(func() (string, error) {
+			return nodeLabel(ctx, missingNodeKey, missingResourceName)
+		}, "2s").Should(Equal(StatusPending))
+
+		By("checking no directory was ever created for the unmounted path")
+		_, err := os.Stat(nonexistentParentDir)
+		Expect(os.IsNotExist(err)).To(BeTrue())
+
+		By("checking a CachePathUnavailable event was recorded for the resource")
+		Eventually(func() (bool, error) {
+			var events corev1.EventList
+			if err := k8sClient.List(ctx, &events); err != nil {
+				return false, err
+			}
+			for _, e := range events.Items {
+				if e.InvolvedObject.Name == missingResourceName && e.Reason == cachePathUnavailableReason {
+					return true, nil
+				}
+			}
+			return false, nil
+		}).Should(BeTrue())
 	})
 })
 
@@ -456,41 +433,13 @@ var _ = Describe("filesystem repair", func() {
 		DeferCleanup(func() {
 			Expect(fw.Close()).To(Succeed())
 		})
-
-		// See the "startup pass" Describe above for why SkipNameValidation
-		// is required for this second, suite-local manager.
-		skipNameValidation := true
-		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-			Scheme:  scheme.Scheme,
-			Metrics: metricsserver.Options{BindAddress: "0"},
-			Controller: config.Controller{
-				SkipNameValidation: &skipNameValidation,
-			},
-		})
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect(mgr.Add(fw)).To(Succeed())
-
-		Expect((&NodeReconciler{
-			Client:   mgr.GetClient(),
-			Recorder: mgr.GetEventRecorder("image-cache-agent-fsrepair-test"),
-			NodeName: fsNodeName,
-			Store:    cache.Store{},
-			Puller:   &fakePuller{},
-			FS:       fw,
-			Resync:   0,
-		}).SetupWithManager(mgr)).To(Succeed())
-
-		mgrCtx, mgrCancel := context.WithCancel(context.Background())
-		done := make(chan struct{})
-		go func() {
-			defer GinkgoRecover()
-			defer close(done)
-			Expect(mgr.Start(mgrCtx)).To(Succeed())
-		}()
-		DeferCleanup(func() {
-			mgrCancel()
-			<-done
+		startOwnReconciler(&NodeReconciler{
+			NodeName:  fsNodeName,
+			CachePath: fsCacheDir,
+			Store:     cache.Store{},
+			Puller:    &fakePuller{},
+			FS:        fw,
+			Resync:    0,
 		})
 
 		By("creating a matching ImageCache")
@@ -499,7 +448,6 @@ var _ = Describe("filesystem repair", func() {
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{fsRepairLabelKey: fsRepairLabelYes},
 				Source:       "registry.example.com/boot-cache-fsrepair:1.0.0",
-				CachePath:    fsCacheDir,
 			},
 		}
 		Expect(k8sClient.Create(ctx, ic)).To(Succeed())
@@ -519,7 +467,7 @@ var _ = Describe("filesystem repair", func() {
 		// fsnotify's inotify backend is not recursive (verified against the
 		// exact pinned version, github.com/fsnotify/fsnotify v1.10.1): a
 		// watch on fsCacheDir reports changes to its direct children only.
-		// SetPaths therefore watches each cachePath and its resource
+		// SetPaths therefore watches the cache path and its resource
 		// directories, which is what makes the tamper below observable:
 		// deleting a single tarball, the way an operator reclaiming disk
 		// space would. No ImageCache event occurs anywhere in this flow,

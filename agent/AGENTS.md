@@ -11,7 +11,7 @@ level split between this agent and the preload RPM is in
 
 A DaemonSet reconciling the node it runs on. `ImageCache` resources declare
 what a set of nodes should cache; the agent pulls those images, extracts the
-tarballs they carry under `<cachePath>/<name>/`, removes what is no longer
+tarballs they carry under `<cache path>/<name>/`, removes what is no longer
 declared, and writes the per-node result as labels on the Node object.
 
 The kubebuilder scaffold is real: `PROJECT` tracks group `image-cache`, domain
@@ -114,9 +114,6 @@ Do not scaffold them back in:
 - A `manager.Runnable` whose `Start` returns `nil` is treated as finished
   normally. Returning `nil` when the component died on its own leaves an agent
   that looks healthy and silently stopped watching.
-- A path from a resource is compared and used as a map key, so normalize it
-  once with `filepath.Clean` at the entry point. Two spellings of the same
-  directory made the garbage collector delete what the same pass extracted.
 - The cache is shared with whatever else writes into it. The agent only
   deletes a directory carrying its own sentinel, or one of its interrupted
   extractions. Keep it that way.

@@ -77,19 +77,17 @@ spec:
   nodeSelector:
     kubernetes.io/os: linux
   source: registry.example.com/my-boot-cache-worker:1.0.0
-  cachePath: /var/lib/image-cache
 ```
 
 - `source` is required: the image whose layers carry the `*.tar` exports to
   cache, as `registry[:port]/repository[:tag][@sha256:<digest>]`.
 - `nodeSelector` matches node labels exactly, like a pod's own selector. Empty
   selects every node.
-- `cachePath` defaults to `/var/lib/image-cache`. The agent extracts into
-  `<cachePath>/<name>/` and deletes only what it owns: a directory carrying its
-  sentinel, or one of its own interrupted extractions. It garbage-collects the
-  default path on every pass even when no resource points at it, and it forgets
-  a non-default path when the process restarts, so a resource deleted during a
-  restart leaves its directory behind.
+
+The agent extracts each resource into `<cache path>/<name>/`, the cache path
+being its `--cache-path` flag (see [Configuration](#configuration)). It deletes
+only what it owns: a directory carrying its sentinel, or one of its own
+interrupted extractions.
 
 The name ends up in a node label, so it is capped at 63 characters and
 `generateName` is a bad idea. Watch progress on the label:
@@ -106,15 +104,20 @@ applying them.
 
 The agent reads its node name from `NODE_NAME`, filled from the downward API
 in the manifests, and exits at startup without it. `--help` lists the flags.
-The one that changes behaviour is `--resync-period`, one hour by default: it
-bounds how long a drift that raised no event at all can last. Resource changes
-and tampering with the cache directory each trigger a pass of their own, and a
-failed pass is retried with backoff, so the periodic pass is a safety net
-rather than the main loop. Zero turns it off and leaves the agent purely event
-driven, which is only safe while the filesystem watcher registers. When it
-cannot, on a node that has hit its inotify limit or a cache path whose mount is
-missing, the agent says so in its logs and leans on the periodic pass. With
-zero there is no pass to lean on.
+
+`--cache-path` is the host directory the agent fills, `/var/lib/image-cache` by
+default. It must be absolute and must not contain `..`, or the agent exits at
+startup. One agent writes one cache path. The DaemonSet mounts the default
+one: change the mount with the flag.
+
+`--resync-period` is one hour by default: it bounds how long a drift that
+raised no event at all can last. Resource changes and tampering with the cache
+directory each trigger a pass of their own, and a failed pass is retried with
+backoff, so the periodic pass is a safety net rather than the main loop. Zero
+turns it off and leaves the agent purely event driven, which is only safe while
+the filesystem watcher registers. When it cannot, on a node that has hit its
+inotify limit or a cache path whose mount is missing, the agent says so in its
+logs and leans on the periodic pass. With zero there is no pass to lean on.
 
 A registry signed by a private CA needs `--ca-file`, a PEM file of CA
 certificates the agent trusts on top of the system ones. Uncomment the

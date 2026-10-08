@@ -5,10 +5,6 @@ package controller
 
 import (
 	"context"
-	"maps"
-	"path/filepath"
-	"slices"
-	"sync"
 	"time"
 
 	"github.com/scality/go-errors"
@@ -30,29 +26,18 @@ import (
 	"github.com/scality/image-cache/agent/internal/puller"
 )
 
-// defaultCachePath is always scanned for garbage, see cache.DefaultPath.
-const defaultCachePath = cache.DefaultPath
-
 // NodeReconciler converges the local node: cache directories and sync-status
 // node labels follow the ImageCache resources selecting this node.
 type NodeReconciler struct {
 	client.Client
 	Recorder events.EventRecorder
 	NodeName string
-	Store    cache.Store
-	Puller   puller.Puller
-	FS       *FSWatcher
-	Resync   time.Duration
-
-	// mu guards knownPaths. The controller runs a single worker, so this is
-	// belt-and-braces rather than a real contention risk.
-	mu sync.Mutex
-	// knownPaths accumulates every cachePath this process has ever scanned.
-	// Once no ImageCache references a path anymore, the CR-derived scan set
-	// would drop it and orphan its directories forever; remembering paths
-	// keeps them GC'd for the rest of the process's lifetime, matching
-	// DESIGN.md's promise that a deletion is repaired by the next pass.
-	knownPaths map[string]bool
+	// CachePath is the host directory the agent fills, cleaned by filepath.Clean.
+	CachePath string
+	Store     cache.Store
+	Puller    puller.Puller
+	FS        *FSWatcher
+	Resync    time.Duration
 }
 
 // +kubebuilder:rbac:groups=image-cache.scality.com,resources=imagecaches,verbs=get;list;watch
@@ -73,31 +58,21 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 		return ctrl.Result{}, errors.Wrap(ErrResources, errors.CausedBy(err))
 	}
 
-	// Desired resources, plus every cache path any resource mentions: paths
-	// are scanned for garbage even once nothing desires them anymore.
 	var desired []*imagecachev1alpha1.ImageCache
-	scanPaths := map[string]bool{defaultCachePath: true}
 	for i := range list.Items {
-		ic := &list.Items[i]
-		scanPaths[cachePathOf(ic)] = true
-		if matches(ic.Spec.NodeSelector, node.Labels) {
+		if ic := &list.Items[i]; matches(ic.Spec.NodeSelector, node.Labels) {
 			desired = append(desired, ic)
 		}
 	}
-	scanPaths = r.rememberPaths(scanPaths)
 
 	// First label pass: expose pending state before the (slow) pulls, so
 	// orchestration gating on the labels sees work in progress.
 	want := map[string]string{}
-	keep := map[string]map[string]bool{}
+	keep := map[string]bool{}
 	var errs []error
 	for _, ic := range desired {
-		path := cachePathOf(ic)
-		if keep[path] == nil {
-			keep[path] = map[string]bool{}
-		}
-		keep[path][ic.Name] = true
-		state, err := r.Store.State(path, ic.Name)
+		keep[ic.Name] = true
+		state, err := r.Store.State(r.CachePath, ic.Name)
 		switch {
 		case err != nil:
 			errs = append(errs, errors.Wrap(err, errors.WithProperty("resource", ic.Name)))
@@ -125,16 +100,14 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 		want[ic.Name] = StatusSynced
 	}
 
-	for path := range scanPaths {
-		if _, err := r.Store.GC(path, keep[path]); err != nil {
-			errs = append(errs, errors.Wrap(err, errors.WithProperty("cachePath", path)))
-		}
+	if _, err := r.Store.GC(r.CachePath, keep); err != nil {
+		errs = append(errs, errors.Wrap(err, errors.WithProperty("cachePath", r.CachePath)))
 	}
 	if err := r.patchLabels(ctx, &node, want); err != nil {
 		errs = append(errs, err)
 	}
 	if r.FS != nil {
-		r.FS.SetPaths(slices.Collect(maps.Keys(scanPaths)))
+		r.FS.SetPaths([]string{r.CachePath})
 	}
 
 	if err := utilerrors.NewAggregate(errs); err != nil {
@@ -144,43 +117,19 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 	return ctrl.Result{RequeueAfter: r.Resync}, nil
 }
 
-// cachePathOf returns the resource's cache path in canonical form. The path
-// is used as a map key and compared against the paths other resources
-// declare, so spellings of the same directory have to collapse into one:
-// `/var/lib/image-cache/` keyed apart from `/var/lib/image-cache` would give
-// the garbage collector a scan set with no matching keep set, and it would
-// delete what the same pass had just extracted.
-func cachePathOf(ic *imagecachev1alpha1.ImageCache) string {
-	return filepath.Clean(ic.Spec.CachePath)
-}
-
 // sync pulls the resource's image and extracts it into its cache directory.
 // It refuses to run when the cache path itself is missing: that means the
 // host mount does not cover it, and extracting would write into the
 // container filesystem.
 func (r *NodeReconciler) sync(ctx context.Context, ic *imagecachev1alpha1.ImageCache) error {
-	path := cachePathOf(ic)
-	if err := fill.CheckCachePath(path); err != nil {
+	if err := fill.CheckCachePath(r.CachePath); err != nil {
 		r.Recorder.Eventf(ic, nil, corev1.EventTypeWarning, "CachePathUnavailable", "Sync",
-			"cache path %s is not usable on node %s (is it mounted?)", path, r.NodeName)
+			"cache path %s is not usable on node %s (is it mounted?)", r.CachePath, r.NodeName)
 		return errors.Wrap(ErrSync, errors.CausedBy(err))
 	}
-	return fill.Fill(ctx, r.Store, r.Puller, path, ic.Name, ic.Spec.Source, func(cerr error) {
+	return fill.Fill(ctx, r.Store, r.Puller, r.CachePath, ic.Name, ic.Spec.Source, func(cerr error) {
 		logf.FromContext(ctx).Error(cerr, "Failed to close the cache image stream", "resource", ic.Name)
 	})
-}
-
-// rememberPaths merges paths into the reconciler's lifetime set of known
-// cache paths and returns the union: every path ever seen keeps getting
-// GC'd even after the last resource referencing it is deleted.
-func (r *NodeReconciler) rememberPaths(paths map[string]bool) map[string]bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.knownPaths == nil {
-		r.knownPaths = map[string]bool{}
-	}
-	maps.Copy(r.knownPaths, paths)
-	return maps.Clone(r.knownPaths)
 }
 
 // patchLabels brings the node's sync-status labels to want, updating node in

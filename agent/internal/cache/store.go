@@ -15,9 +15,9 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 )
 
-// DefaultPath is where the cache lives unless something says otherwise. The
-// CRD defaults to it, the RPM's sysconfig ships it, and both the agent and
-// the command read it from here so that a change has one place to happen.
+// DefaultPath is the default of the agent's and the command's --cache-path.
+// The preload script, its sysconfig and the sample DaemonSet's volume repeat
+// it: change them together.
 const DefaultPath = "/var/lib/image-cache"
 
 // sentinelName marks a directory as fully extracted and agent-owned.

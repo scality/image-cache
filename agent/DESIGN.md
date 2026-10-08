@@ -26,9 +26,6 @@ spec:
     kubernetes.io/os: linux
   # Required. The image whose layers contain the tarballs to cache.
   source: registry.example.com/boot-cache-worker:134.0.0
-  # Optional. Defaults to /var/lib/image-cache, matching the
-  # containerd-image-preload default.
-  cachePath: /var/lib/image-cache
 ```
 
 Validations:
@@ -37,8 +34,6 @@ Validations:
   `registry[:port]/repository[:tag][@sha256:<digest>]`, with a lowercase
   repository, at most 512 characters. The reference is not resolved at
   admission; only its shape is checked.
-- `cachePath` must be an absolute path and must not contain `..` anywhere,
-  checked as a plain substring rather than by parsing path segments.
 - `metadata.name` is capped at 63 characters: the name becomes a node label
   name (see below), and Kubernetes label names cannot exceed 63 characters.
 
@@ -64,8 +59,8 @@ labels:
   directory.
 
 If a resource stays `pending` longer than expected, look at the events the
-agent records on it — sync failures and missing cache-path mounts are
-reported there without changing the label's two-value vocabulary:
+agent records on it. Sync failures and missing cache-path mounts are
+reported there. The label keeps its two values:
 
 ```console
 kubectl describe imagecache worker-134-0-0
@@ -80,13 +75,14 @@ kubectl get nodes -l image-cache.scality.com/worker-134-0-0=synced
 
 Absence of the label means either the node is not selected by this
 ImageCache, or the agent has not completed a pass since the resource
-appeared — both look the same to a gate; the startup and watch triggers make
-the second case transient.
+appeared. Both look the same to a gate, and the startup and watch triggers
+make the second case transient.
 
 ## Cache layout
 
-Each ImageCache owns a subdirectory of its `cachePath`, named after the
-resource:
+Each ImageCache owns a subdirectory of the cache path, named after the
+resource. An agent has one cache path, its `--cache-path` flag, which defaults
+to `/var/lib/image-cache` like containerd-image-preload:
 
 ```
 /var/lib/image-cache/
@@ -151,13 +147,12 @@ the object being reconciled, which is what a log aggregator groups on.
 Triggers:
 
 - Any ImageCache event (create, update, delete), mapped to the single key.
-- Filesystem events (fsnotify) on the cache paths in use, so a manual
-  deletion of tarballs is repaired quickly. Each cache path is watched
-  together with the resource directories under it: fsnotify is not
-  recursive, and a watch on the cache path alone would report a whole
-  resource directory disappearing but not a single tarball deleted inside
-  one. Watchers are adjusted after each pass as cache paths and resource
-  directories come and go.
+- Filesystem events (fsnotify) on the cache path, so a manual deletion of
+  tarballs is repaired quickly. The cache path is watched together with the
+  resource directories under it: fsnotify is not recursive, and a watch on
+  the cache path alone would report a whole resource directory disappearing
+  but not a single tarball deleted inside one. Watchers are adjusted after
+  each pass as resource directories come and go.
 - A periodic resync as a safety net, every hour by default
   (`--resync-period`). It is not what retries a failed pass, which is
   requeued with backoff, nor what repairs tampering, which raises a
@@ -174,12 +169,8 @@ One pass:
 2. For each desired resource: if its directory is complete, done. Otherwise
    set the label to `pending`, pull `spec.source` (linux/amd64), extract
    atomically, then set the label to `synced`.
-3. Garbage-collect: in every scanned cache path, delete the sentinel-bearing
-   directories that no desired resource claims. The scan set is the default
-   cache path plus every cache path an ImageCache references now or referenced
-   earlier in this agent process's lifetime — a custom path stays in the set
-   after its last resource is deleted, so its orphaned directory is still
-   collected. This set lives only in memory.
+3. Garbage-collect: in the cache path, delete the sentinel-bearing
+   directories that no desired resource claims.
 4. Remove `image-cache.scality.com/*` node labels that no desired resource
    claims.
 
@@ -192,17 +183,13 @@ problem, a registry problem and a filesystem problem stay distinguishable
 with `errors.Is` once they have been aggregated.
 
 This level-triggered model needs no finalizers. Deletion is not a special
-case — the resource simply disappears from the desired state — so a deletion
-that happens while the agent is running is repaired by the next full pass.
-One bounded exception survives a restart: because the scan set is in-memory,
-an orphan directory on a non-default cache path whose last resource was
-deleted while the agent was down is collected only once that path is
-referenced again (the default path is always scanned, so it is never
-affected).
+case: the resource simply disappears from the desired state, so a deletion
+is repaired by the next full pass, the startup one included when the agent
+was down.
 
 Finalizers were considered and rejected: with per-resource reconciliation,
 cleanup after deletion would require one finalizer per node on a shared
-cluster-scoped resource, which is fragile — a decommissioned node would
+cluster-scoped resource, which is fragile: a decommissioned node would
 leave a finalizer behind and block the deletion forever.
 
 ## Image pulling
@@ -252,12 +239,9 @@ Three consequences worth stating:
   agent recognises a resource by it. Given the name the `ImageCache` will
   carry, the agent finds the sentinel, reads it as complete, and pulls
   nothing. Given any other name, garbage collection removes the directory,
-  since it bears the agent's sentinel and nothing claims it. That only holds
-  under a cache path the agent scans, which is the default one plus the paths
-  declared by resources: a directory imported under `--cache-path /srv/images`
-  is the caller's to clean up, because nothing points the agent at it. The
-  command validates the name as a DNS-1123 subdomain, the rule the API server
-  applies to the resource, so the two cannot disagree on what a name is.
+  since it bears the sentinel and nothing claims it. The command validates
+  the name as a DNS-1123 subdomain, the rule the API server applies to the
+  resource, so the two cannot disagree on what a name is.
 - **It replaces only what the store wrote.** The swap that publishes a
   resource removes whatever is at the destination first, so it refuses a
   directory that does not bear the sentinel. The cache path is shared, and a
@@ -280,15 +264,16 @@ creation).
 It deploys as a DaemonSet (sample under `config/`): `NODE_NAME` from the
 downward API, control-plane tolerations, read-only root filesystem.
 
-Two deployment constraints follow from `cachePath` living on the host:
+Three deployment constraints follow from the cache path living on the host:
 
-- **Mounts must cover cache paths.** The pod mounts host paths at identical
-  container paths (the sample mounts the default `/var/lib/image-cache`).
-  A resource whose `cachePath` is not covered by a mount would silently write
-  to the container filesystem; the agent therefore refuses to process a
-  resource whose `cachePath` does not exist, records an event, and leaves the
-  label `pending`. Integrators must mount every cache path their resources
-  declare.
+- **The mount must cover the cache path.** The pod mounts the host path at
+  the identical container path (the sample mounts the default
+  `/var/lib/image-cache`). A cache path the mount does not cover would
+  silently write to the container filesystem; the agent therefore refuses to
+  process a resource while the cache path does not exist, records an event,
+  and leaves the label `pending`. Changing `--cache-path` means changing the
+  mount with it, and the old directory is no longer collected: remove it by
+  hand.
 - **The host directory must be writable by UID 65532.** `fsGroup` does not
   apply to hostPath volumes. The sample manifest uses a root init container
   that chowns the cache directory; integrators managing permissions at
@@ -313,8 +298,8 @@ The agent never writes ImageCache resources (no status, no finalizers).
   collection ownership rules), node-selector matching, label diffing.
 - Puller tests against go-containerregistry's in-memory registry, pulling a
   forged image whose layers contain tarballs.
-- envtest: the full reconciler with a fake puller — resource lifecycle to
+- envtest: the full reconciler with a fake puller, from resource lifecycle to
   node labels and on-disk state, including failure paths.
-- A minimal kind-based e2e smoke test: CRD installed, agent running, node
-  labelled `pending` for a resource with an unreachable source, label
-  cleared on deletion — no registry infrastructure required.
+- A minimal kind-based e2e smoke test, with no registry infrastructure: CRD
+  installed, agent running, node labelled `pending` for a resource with an
+  unreachable source, label cleared on deletion.

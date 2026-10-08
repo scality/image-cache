@@ -394,8 +394,8 @@ func TestUnknownCommandIsNamed(t *testing.T) {
 	}
 }
 
-// --cache-path is the other half of the join the store makes, and the CRD
-// validates it for the same reason. A relative or climbing path lands the
+// --cache-path is the other half of the join the store makes, and the agent
+// validates its own for the same reason. A relative or climbing path lands the
 // extraction, and the removal that precedes it, somewhere else entirely.
 func TestCachePathCannotBeRelativeOrClimb(t *testing.T) {
 	src := archive(t, map[string][]byte{etcdTarPath: []byte("etcd")})

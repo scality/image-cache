@@ -175,8 +175,6 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out
 	// the size of a whole boot cache image. The agent's garbage collection
 	// clears those, but this command exists for a node that has no agent, so
 	// every interrupted attempt would otherwise stay on the disk for good.
-	// Only this resource's own leftovers, since a run for another name may be
-	// in flight.
 	swept, err := store.SweepTemporaries(cachePath, name)
 	if err != nil {
 		return err

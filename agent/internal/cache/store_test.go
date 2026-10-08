@@ -931,3 +931,72 @@ func TestGCReportsWhatItCannotRemoveAndGoesOn(t *testing.T) {
 		t.Errorf("removed = %v, want %v", removed, want)
 	}
 }
+
+// onFirstRead runs fn once, on the first read, while Extract is writing its
+// temporary directory.
+type onFirstRead struct {
+	r    io.Reader
+	fn   func()
+	done bool
+}
+
+func (o *onFirstRead) Read(p []byte) (int, error) {
+	if !o.done {
+		o.done = true
+		o.fn()
+	}
+	return o.r.Read(p)
+}
+
+// An import run by hand on a node where the agent runs: the agent's pass, or
+// another run for the same resource, must not remove the directory being
+// written.
+func TestGCAndSweepLeaveATemporaryBeingWritten(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	var removed []string
+	stream := &onFirstRead{r: tarStream(t, map[string]string{etcdEntry: etcdBody}), fn: func() {
+		gced, err := s.GC(dir, nil)
+		if err != nil {
+			t.Error(err)
+		}
+		swept, err := s.SweepTemporaries(dir, "worker")
+		if err != nil {
+			t.Error(err)
+		}
+		removed = append(gced, swept...)
+	}}
+	if err := s.Extract(t.Context(), dir, "worker", Record{Owner: otherOwner}, stream); err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("removed %v while it was written", removed)
+	}
+	if st, _ := s.State(dir, "worker"); st != Complete {
+		t.Errorf("state = %v, want Complete", st)
+	}
+}
+
+func TestGCRemovesATemporaryOnceItsWriterIsGone(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	tmp, err := os.MkdirTemp(dir, ".worker.tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockTemporary(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := s.GC(dir, nil); err != nil || len(removed) != 0 {
+		t.Fatalf("locked: removed = %v, err = %v, want nothing", removed, err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := s.GC(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0] != filepath.Base(tmp) {
+		t.Errorf("unlocked: removed = %v, want %s", removed, filepath.Base(tmp))
+	}
+}

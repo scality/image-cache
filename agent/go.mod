@@ -10,6 +10,7 @@ require (
 	github.com/scality/go-errors v1.3.0
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/zap v1.27.1
+	golang.org/x/sys v0.46.0
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0
 	k8s.io/client-go v0.36.0
@@ -80,7 +81,6 @@ require (
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/term v0.44.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	golang.org/x/time v0.14.0 // indirect

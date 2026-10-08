@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/scality/go-errors"
+	"golang.org/x/sys/unix"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 )
 
@@ -192,6 +193,8 @@ func (s Store) readSentinel(cachePath, name string) (sentinel, error) {
 // the resource Absent; the next pass redoes the extraction. Extract must not
 // be called concurrently for the same name. A failed extraction leaves either
 // the previous state or a hidden temporary directory that GC removes later.
+// The temporary directory is locked while it is written, so that GC and
+// SweepTemporaries, in this process or another, leave it alone.
 //
 // Every read honours ctx, inside an entry too: an entry can be hundreds of
 // megabytes, and nothing else watches ctx when the source is a local archive.
@@ -209,6 +212,14 @@ func (s Store) Extract(
 			err = utilerrors.NewAggregate([]error{err, os.RemoveAll(tmp)})
 		}
 	}()
+	lock, err := lockTemporary(tmp)
+	if err != nil {
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("locking the temporary directory"),
+			errors.WithProperty("resource", name))
+	}
+	// Read-only handle, kept for the lock: a close error loses nothing.
+	defer func() { _ = lock.Close() }()
 
 	var files []string
 	tr := tar.NewReader(ctxReader{ctx: ctx, r: content})
@@ -391,8 +402,7 @@ func (s Store) replaceable(final, name, owner string) error {
 // cleans up after itself when it returns an error, but not when the process
 // is killed outright, and a leftover is the size of the image being written.
 //
-// Scoped to one name because a run for another resource may be in flight:
-// GC, which the agent calls, is the one that sweeps them all.
+// A locked one belongs to a run still in flight, and stays.
 func (s Store) SweepTemporaries(cachePath, name string) ([]string, error) {
 	entries, err := os.ReadDir(cachePath)
 	if err != nil {
@@ -406,14 +416,56 @@ func (s Store) SweepTemporaries(cachePath, name string) ([]string, error) {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
 			continue
 		}
-		if rerr := os.RemoveAll(filepath.Join(cachePath, e.Name())); rerr != nil {
+		ok, rerr := removeTemporary(filepath.Join(cachePath, e.Name()))
+		if rerr != nil {
 			errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(rerr),
 				errors.WithProperty("directory", e.Name())))
 			continue
 		}
-		removed = append(removed, e.Name())
+		if ok {
+			removed = append(removed, e.Name())
+		}
 	}
 	return removed, utilerrors.NewAggregate(errs)
+}
+
+// lockTemporary takes an exclusive lock on the temporary directory dir. The
+// lock lasts until the returned file is closed, or the process dies. GC may
+// remove dir between its creation and the lock, so dir is checked again once
+// locked.
+func lockTemporary(dir string) (*os.File, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		return nil, utilerrors.NewAggregate([]error{err, f.Close()})
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return nil, utilerrors.NewAggregate([]error{err, f.Close()})
+	}
+	return f, nil
+}
+
+// removeTemporary removes the temporary directory dir and reports whether it
+// did. It leaves dir alone while an extraction holds its lock.
+func removeTemporary(dir string) (bool, error) {
+	f, err := os.Open(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, os.RemoveAll(dir)
 }
 
 // seeded reports whether a writer other than the agent wrote dir: content
@@ -439,7 +491,7 @@ func (Store) seeded(dir string) (bool, error) {
 // GC removes the entries under cachePath that keep does not name, and
 // returns their names. A few stay: "Cache layout" in agent/DESIGN.md lists
 // them and why.
-func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
+func (s Store) GC(cachePath string, keep map[string]bool) (removed []string, err error) {
 	entries, err := os.ReadDir(cachePath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -448,17 +500,29 @@ func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
 		return nil, errors.Wrap(ErrGC, errors.CausedBy(err),
 			errors.WithDetail("listing the cache path"))
 	}
-	var removed []string
 	var errs []error
 	for _, e := range entries {
 		if keep[e.Name()] || e.Type().IsRegular() || e.Name() == lostFound {
 			continue
 		}
-		// An interrupted extraction goes whoever started it. Its sentinel,
-		// written before the rename, does not make it seeded.
-		stale := strings.HasPrefix(e.Name(), ".") && strings.Contains(e.Name(), ".tmp-")
-		if e.IsDir() && !stale {
-			seeded, err := s.seeded(filepath.Join(cachePath, e.Name()))
+		path := filepath.Join(cachePath, e.Name())
+		// An interrupted extraction goes whoever started it, once nobody
+		// writes it any more. Its sentinel, written before the rename, does
+		// not make it seeded.
+		if e.IsDir() && strings.HasPrefix(e.Name(), ".") && strings.Contains(e.Name(), ".tmp-") {
+			ok, err := removeTemporary(path)
+			if err != nil {
+				errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),
+					errors.WithProperty("entry", e.Name())))
+				continue
+			}
+			if ok {
+				removed = append(removed, e.Name())
+			}
+			continue
+		}
+		if e.IsDir() {
+			seeded, err := s.seeded(path)
 			if err != nil {
 				errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),
 					errors.WithDetail("reading the sentinel, so the directory is kept"),
@@ -470,7 +534,7 @@ func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
 			}
 		}
 		// A link goes, not what it points to.
-		if err := os.RemoveAll(filepath.Join(cachePath, e.Name())); err != nil {
+		if err := os.RemoveAll(path); err != nil {
 			errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),
 				errors.WithProperty("entry", e.Name())))
 			continue

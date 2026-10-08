@@ -114,6 +114,8 @@ complete and records who wrote it:
     instance, until a resource adopts it (see the one-shot command below). A
     sentinel that names no owner counts as another writer;
   - `lost+found`, when the cache path is a filesystem of its own;
+  - an extraction in progress: a hidden directory whose name contains
+    `.tmp-` and that a writer still locks (see below);
   - a directory whose sentinel cannot be read. It may be seeded, so it stays,
     and the pass fails until the sentinel can be read.
 
@@ -147,7 +149,10 @@ rename cannot replace an existing directory), so a crash mid-swap can
 transiently leave the resource absent; the next pass redoes the extraction.
 A crash before the rename leaves a hidden `.<name>.tmp-*` directory next to
 the target; garbage collection removes it on a later pass, the same as an
-orphaned resource directory.
+orphaned resource directory. The writer holds a `flock` on that directory
+until it is done, and garbage collection skips a locked one: an import run by
+hand on a node where the agent runs is not removed while it writes. The lock
+goes with the process, so a crash does not leave it held.
 
 A resource whose directory is complete and written by the agent is never
 re-pulled: `spec.source` is effectively immutable once synced. A directory

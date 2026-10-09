@@ -33,13 +33,28 @@ var (
 	ErrTLS = errors.New("conflicting registry TLS settings")
 )
 
+// Image identifies what a source resolved to.
+type Image struct {
+	// Digest is the manifest's digest: how the source serves the image. It
+	// depends on how the image is stored, so the same image reached through
+	// a registry and through a docker archive carries two of them.
+	Digest string
+	// Layers are the diff IDs of the image's layers, in order: the digests
+	// of the uncompressed layers. Two sources are compared by them, see
+	// "Adopting a seeded directory" in agent/DESIGN.md.
+	Layers []string
+}
+
 // Puller resolves an image reference and returns the entries of its layers.
 type Puller interface {
 	// Pull returns the entries of the image's layers, in layer order and as
-	// the layers carry them, as one tar stream, and the resolved image digest.
-	// Nothing is filtered out on the way, see entries. The caller closes the
-	// stream.
-	Pull(ctx context.Context, ref string) (io.ReadCloser, string, error)
+	// the layers carry them, as one tar stream, and what the source resolved
+	// to. Nothing is filtered out on the way, see entries. The caller closes
+	// the stream.
+	Pull(ctx context.Context, ref string) (io.ReadCloser, Image, error)
+	// Resolve returns what the source resolves to without reading its
+	// layers: for a registry, the manifest and the configuration.
+	Resolve(ctx context.Context, ref string) (Image, error)
 }
 
 // Remote pulls linux/amd64 images from an OCI registry. The zero value
@@ -113,10 +128,26 @@ func caPool(path string) (*x509.CertPool, error) {
 var platform = v1.Platform{OS: "linux", Architecture: "amd64"}
 
 // Pull implements Puller.
-func (r Remote) Pull(ctx context.Context, ref string) (io.ReadCloser, string, error) {
+func (r Remote) Pull(ctx context.Context, ref string) (io.ReadCloser, Image, error) {
+	img, id, err := r.open(ctx, ref)
+	if err != nil {
+		return nil, Image{}, err
+	}
+	return entries(img), id, nil
+}
+
+// Resolve implements Puller.
+func (r Remote) Resolve(ctx context.Context, ref string) (Image, error) {
+	_, id, err := r.open(ctx, ref)
+	return id, err
+}
+
+// open resolves ref to its linux/amd64 image. It reads the manifest and the
+// configuration, never a layer: those are fetched as the stream is read.
+func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 	parsed, err := name.ParseReference(ref)
 	if err != nil {
-		return nil, "", errors.Wrap(ErrReference, errors.CausedBy(err),
+		return nil, Image{}, errors.Wrap(ErrReference, errors.CausedBy(err),
 			errors.WithProperty("source", ref))
 	}
 	opts := []remote.Option{remote.WithContext(ctx), remote.WithPlatform(platform)}
@@ -125,15 +156,11 @@ func (r Remote) Pull(ctx context.Context, ref string) (io.ReadCloser, string, er
 	}
 	img, err := remote.Image(parsed, opts...)
 	if err != nil {
-		return nil, "", errors.Wrap(ErrPull, errors.CausedBy(err),
+		return nil, Image{}, errors.Wrap(ErrPull, errors.CausedBy(err),
 			errors.WithProperty("source", ref))
 	}
-	digest, err := img.Digest()
-	if err != nil {
-		return nil, "", errors.Wrap(ErrPull, errors.CausedBy(err),
-			errors.WithDetail("resolving the digest"), errors.WithProperty("source", ref))
-	}
-	return entries(img), digest.String(), nil
+	id, err := identify(img, ref)
+	return img, id, err
 }
 
 // Tarball reads an image out of a docker archive on the local filesystem,
@@ -141,12 +168,26 @@ func (r Remote) Pull(ctx context.Context, ref string) (io.ReadCloser, string, er
 type Tarball struct{}
 
 // Pull implements Puller.
-func (Tarball) Pull(ctx context.Context, ref string) (io.ReadCloser, string, error) {
+func (t Tarball) Pull(ctx context.Context, ref string) (io.ReadCloser, Image, error) {
+	img, id, err := t.open(ctx, ref)
+	if err != nil {
+		return nil, Image{}, err
+	}
+	return entries(img), id, nil
+}
+
+// Resolve implements Puller.
+func (t Tarball) Resolve(ctx context.Context, ref string) (Image, error) {
+	_, id, err := t.open(ctx, ref)
+	return id, err
+}
+
+func (Tarball) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 	// Nothing below reaches the network, so the context has no call to carry
 	// it into. Honouring cancellation here keeps the two implementations
 	// interchangeable for a caller that gave up before this one started.
 	if err := ctx.Err(); err != nil {
-		return nil, "", errors.Wrap(ErrPull, errors.CausedBy(err),
+		return nil, Image{}, errors.Wrap(ErrPull, errors.CausedBy(err),
 			errors.WithProperty("source", ref))
 	}
 	// A nil tag demands the archive hold exactly one image, which is what a
@@ -154,37 +195,43 @@ func (Tarball) Pull(ctx context.Context, ref string) (io.ReadCloser, string, err
 	// rather than extracted down an arbitrary branch.
 	img, err := tarball.ImageFromPath(ref, nil)
 	if err != nil {
-		return nil, "", errors.Wrap(ErrPull, errors.CausedBy(err),
+		return nil, Image{}, errors.Wrap(ErrPull, errors.CausedBy(err),
 			errors.WithProperty("source", ref))
 	}
-	// Remote pins the platform when it resolves the reference; an archive
-	// carries whatever it was saved from. Checking here keeps the two
-	// implementations of this interface interchangeable, which is what the
-	// caller relies on when it picks one by the shape of the source. Without
-	// it, an image saved on an arm64 machine fills the cache of an x86_64
-	// node, the sentinel says the resource is complete, and nothing further
-	// down looks at the architecture again.
+	id, err := identify(img, ref)
+	return img, id, err
+}
+
+// identify reads the manifest digest and the layers' diff IDs, and refuses an
+// image built for another platform. remote.WithPlatform only picks a child out
+// of an index, and an archive carries whatever it was saved from. Without the
+// check, an arm64 image fills the cache of an x86_64 node, the sentinel says
+// the resource is complete, and nothing further down looks at the
+// architecture again.
+func identify(img v1.Image, ref string) (Image, error) {
+	digest, err := img.Digest()
+	if err != nil {
+		return Image{}, errors.Wrap(ErrPull, errors.CausedBy(err),
+			errors.WithDetail("resolving the digest"), errors.WithProperty("source", ref))
+	}
 	cfg, err := img.ConfigFile()
 	if err != nil {
-		return nil, "", errors.Wrap(ErrPull, errors.CausedBy(err),
-			errors.WithDetail("reading the image configuration"),
-			errors.WithProperty("source", ref))
+		return Image{}, errors.Wrap(ErrPull, errors.CausedBy(err),
+			errors.WithDetail("reading the image configuration"), errors.WithProperty("source", ref))
 	}
 	// Only a declared mismatch is refused. A carrier image holds nothing but
 	// tarballs, and the tool that builds one may record no platform at all,
 	// which contradicts nothing.
 	if (cfg.OS != "" && cfg.OS != platform.OS) ||
 		(cfg.Architecture != "" && cfg.Architecture != platform.Architecture) {
-		return nil, "", errors.Wrap(ErrPull,
-			errors.WithDetail(fmt.Sprintf("the archive carries a %s/%s image, and the cache is filled for %s/%s",
+		return Image{}, errors.Wrap(ErrPull,
+			errors.WithDetail(fmt.Sprintf("the image is %s/%s, and the cache is filled for %s/%s",
 				cfg.OS, cfg.Architecture, platform.OS, platform.Architecture)),
 			errors.WithProperty("source", ref))
 	}
-
-	digest, err := img.Digest()
-	if err != nil {
-		return nil, "", errors.Wrap(ErrPull, errors.CausedBy(err),
-			errors.WithDetail("resolving the digest"), errors.WithProperty("source", ref))
+	layers := make([]string, 0, len(cfg.RootFS.DiffIDs))
+	for _, d := range cfg.RootFS.DiffIDs {
+		layers = append(layers, d.String())
 	}
-	return entries(img), digest.String(), nil
+	return Image{Digest: digest.String(), Layers: layers}, nil
 }

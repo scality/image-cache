@@ -106,8 +106,9 @@ make -C agent deploy IMG=<your-registry>/image-cache-agent:<tag>
 Those two commands are enough from an amd64 machine, deploying into a
 namespace that enforces the `privileged` Pod Security Standard. Anything else
 takes a step or two, and [agent/README.md](agent/README.md#deploying) has them:
-building for amd64 from another architecture, the label the manifests leave off
-the namespace they create, and the flags, `--resync-period` included.
+building for amd64 from another architecture, and the label the manifests leave
+off the namespace they create. The flags, `--cache-path` and `--resync-period`
+included, are under [Configuration](agent/README.md#configuration).
 
 Then declare what each node should cache:
 
@@ -120,7 +121,6 @@ spec:
   nodeSelector:
     kubernetes.io/os: linux
   source: registry.example.com/my-boot-cache-worker:1.0.0
-  cachePath: /var/lib/image-cache
 ```
 
 Every selected node is labelled with the progress of that resource, which
@@ -155,8 +155,9 @@ there is no agent yet to create it either.
 `--name` is the name of the `ImageCache` resource this content belongs to. It
 is the directory the tarballs land in, and it is how the agent recognises the
 resource later: give it the name the resource will carry and the agent adopts
-what the command wrote, instead of pulling the same image again and collecting
-the directory it did not recognise.
+what the command wrote instead of pulling the same image again. Until a
+resource claims it, the agent leaves the directory alone, so it does not
+matter whether the agent or the resources reach the node first.
 
 The source is read as a path when it starts with a separator or a dot, or ends
 in `.tar`, and as an image reference otherwise. What decides is the shape of
@@ -165,23 +166,29 @@ archive named something else has to be given as `./that-name`.
 
 A second run over a resource that is already complete writes nothing and
 reaches no registry, so the command is safe to call on every convergence
-rather than only at install. `--cache-path` overrides the directory; it has to
-be absolute, the same rule the `ImageCache` field follows. `--ca-file` names a
-PEM file of CA certificates to trust for a registry signed by a private CA, on
-top of the system ones. It is checked on every run, and never read for an
-archive.
-`--insecure-skip-tls-verify` accepts any certificate instead, for a test
-cluster only, and prints a warning.
+rather than only at install. Don't use it to repair an incomplete resource on
+a node where the agent runs: the agent repairs it, and two writers swapping
+the same directory into place can make one of them fail.
 
-The import refuses to replace a directory it did not write, that is one
-without the agent's sentinel in it. The cache path is shared and the command
-runs as root, so a name that lands on a neighbouring directory stops rather
-than emptying it. Removing that directory by hand is how you say you meant it.
+`--cache-path` overrides the directory. Give it the same value as the agent's
+`--cache-path`, or the agent never finds what the command wrote. Both follow
+the same rule: absolute, and without `..`.
+`--ca-file` names a PEM file of CA certificates to trust for a registry signed
+by a private CA, on top of the system ones. It is checked on every run, and
+never read for an archive. `--insecure-skip-tls-verify` accepts any
+certificate instead, for a test cluster only, and prints a warning.
 
-One thing to get right the first time: nothing checks that what you imported
-under a name is what the resource of that name will ask for. Seed the wrong
-image and the agent adopts it, labels the node synced and never pulls the
-right one. Removing the directory by hand is the way back.
+The import refuses to replace a directory without a sentinel. The command runs
+as root, so a wrong name or cache path that lands on a directory the store did
+not write stops rather than emptying it. Remove that directory by hand if you
+meant it.
+
+Before it adopts a directory, the agent checks that it holds the image the
+resource asks for, by comparing layers. It reads no layer to do so. The same
+image is taken over without a pull, another image is replaced, and an
+unreachable source leaves the directory as it is. See
+[agent/DESIGN.md](agent/DESIGN.md#adopting-a-seeded-directory). A directory
+imported under a name no resource ever carries stays until you remove it.
 
 ### Building a cache image
 
@@ -206,10 +213,11 @@ docker push registry.example.com/my-boot-cache-worker:1.0.0
 
 Four things the agent expects:
 
-- **A `linux/amd64` image.** It resolves the reference for that platform and
-  no other, which is also why the build above pins it. An archive read by
-  `imagecachectl` is checked the same way, so an image saved on an arm64
-  machine is refused instead of filling an x86_64 node's cache.
+- **A `linux/amd64` image.** The agent refuses an image whose configuration
+  declares another platform, from an index or a single manifest, which is
+  also why the build above pins it. An archive read by `imagecachectl` is
+  checked the same way, so an image saved on an arm64 machine is refused
+  instead of filling an x86_64 node's cache.
 - **Unique file names.** Every file lands flat, under its base name, so two
   files called `app.tar`, in different directories or written by different
   layers, fail the extraction instead of overwriting each other.
@@ -244,7 +252,8 @@ the agent image is still to come.
 
 ## Development
 
-The agent needs Go 1.26+; the RPM tooling only needs Docker.
+The agent needs Go 1.26+. The RPM tooling needs Docker, and Go for the
+`imagecachectl` package.
 
 ```console
 make -C agent test          # unit tests and the envtest suite

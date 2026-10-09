@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/scality/go-errors"
+
+	"github.com/scality/image-cache/agent/internal/cache"
 )
 
 // startedWatcher returns a watcher whose forwarding loop runs for the test.
@@ -110,6 +112,113 @@ func TestFSWatcherWatchesResourceDirectoriesCreatedLater(t *testing.T) {
 	case <-fw.Events:
 	case <-time.After(5 * time.Second):
 		t.Fatal("no event received for a resource directory created after the first pass")
+	}
+}
+
+// An extraction by another process writes its temporary directory thousands
+// of times. None of it may trigger a pass: only the rename, seen on the root.
+func TestFSWatcherIgnoresTemporaryDirectories(t *testing.T) {
+	fw := startedWatcher(t)
+	root := t.TempDir()
+	tmp := filepath.Join(root, ".worker-134-0-0.tmp-123")
+	if err := os.Mkdir(tmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fw.SetPaths([]string{root})
+	drain(fw)
+
+	if err := os.WriteFile(filepath.Join(tmp, "pause.tar"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fw.Events:
+		t.Fatal("received an event from inside a temporary directory")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	if err := os.Rename(tmp, filepath.Join(root, "worker-134-0-0")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fw.Events:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event received after the temporary directory was renamed")
+	}
+}
+
+// A write to a tarball does not change what a pass checks, so it triggers
+// none. Removing the file does.
+func TestFSWatcherIgnoresWrites(t *testing.T) {
+	fw := startedWatcher(t)
+	root := t.TempDir()
+	resource := filepath.Join(root, "worker-134-0-0")
+	if err := os.Mkdir(resource, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tarball := filepath.Join(resource, "pause.tar")
+	if err := os.WriteFile(tarball, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fw.SetPaths([]string{root})
+	drain(fw)
+
+	f, err := os.OpenFile(tarball, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 100 {
+		if _, err := f.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fw.Events:
+		t.Fatal("received an event for a write")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	if err := os.Remove(tarball); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fw.Events:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event received after the tarball was removed")
+	}
+}
+
+// A pass reads the sentinel, so a sentinel damaged in place must trigger one.
+func TestFSWatcherEmitsOnASentinelWrite(t *testing.T) {
+	fw := startedWatcher(t)
+	root := t.TempDir()
+	resource := filepath.Join(root, "worker-134-0-0")
+	if err := os.Mkdir(resource, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(resource, cache.SentinelName)
+	if err := os.WriteFile(sentinel, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fw.SetPaths([]string{root})
+	drain(fw)
+
+	f, err := os.OpenFile(sentinel, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fw.Events:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event received after the sentinel was written")
 	}
 }
 

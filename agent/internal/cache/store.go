@@ -10,20 +10,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/scality/go-errors"
+	"golang.org/x/sys/unix"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 )
 
-// DefaultPath is where the cache lives unless something says otherwise. The
-// CRD defaults to it, the RPM's sysconfig ships it, and both the agent and
-// the command read it from here so that a change has one place to happen.
+// DefaultPath is the default of the agent's and the command's --cache-path.
+// The preload script, its sysconfig and the sample DaemonSet's volume repeat
+// it: change them together.
 const DefaultPath = "/var/lib/image-cache"
 
-// sentinelName marks a directory as fully extracted and agent-owned.
-// It is written last; garbage collection only considers directories
-// bearing it, so foreign content in a shared cache path is never touched.
-const sentinelName = ".image-cache-agent.json"
+// SentinelName marks a directory as fully extracted by the store, and names
+// who wrote it. It is written last.
+const SentinelName = ".image-cache-agent.json"
 
 // Failures of this package are classified by these sentinels. Filesystem and
 // archive errors are stamped with one where they enter, because a foreign
@@ -48,9 +49,35 @@ const (
 	Complete
 )
 
+// lostFound is where fsck puts orphaned inodes back, at the root of an ext
+// filesystem.
+const lostFound = "lost+found"
+
+// OwnerAgent is the owner the agent writes in a sentinel. Another owner, or
+// none, means another writer seeded the directory: garbage collection leaves
+// it until a resource adopts it.
+const OwnerAgent = "image-cache-agent"
+
+// Record is what the sentinel remembers about a directory's content, beyond
+// the files it lists.
+type Record struct {
+	// Digest is the manifest digest the source served.
+	Digest string `json:"digest"`
+	// Owner is who wrote the directory.
+	Owner string `json:"owner,omitempty"`
+	// Source is the reference or the archive path the content was read from,
+	// kept for whoever looks at the directory. Two sources naming the same
+	// image can differ, so it is not what an image is compared by.
+	Source string `json:"source,omitempty"`
+	// Layers are the image's layer diff IDs, as puller.Image reports them.
+	Layers []string `json:"layers,omitempty"`
+}
+
+// sentinel is what the sentinel file holds: the record, and the files the
+// directory has to hold to be complete.
 type sentinel struct {
-	Digest string   `json:"digest"`
-	Files  []string `json:"files"`
+	Record
+	Files []string `json:"files"`
 }
 
 // Store reads and writes per-resource cache directories. Resource names are
@@ -64,7 +91,7 @@ func (Store) dir(cachePath, name string) string { return filepath.Join(cachePath
 // check the returned error before trusting the State: a filesystem error
 // (e.g. permission denied) is reported alongside the zero value Absent.
 func (s Store) State(cachePath, name string) (State, error) {
-	data, err := os.ReadFile(filepath.Join(s.dir(cachePath, name), sentinelName))
+	data, err := os.ReadFile(filepath.Join(s.dir(cachePath, name), SentinelName))
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		if _, serr := os.Stat(s.dir(cachePath, name)); errors.Is(serr, os.ErrNotExist) {
@@ -73,6 +100,8 @@ func (s Store) State(cachePath, name string) (State, error) {
 			return Absent, errors.Wrap(ErrState, errors.CausedBy(serr),
 				errors.WithProperty("resource", name))
 		}
+		return Incomplete, nil
+	case noDirectory(err):
 		return Incomplete, nil
 	case err != nil:
 		return Absent, errors.Wrap(ErrState, errors.CausedBy(err),
@@ -90,6 +119,72 @@ func (s Store) State(cachePath, name string) (State, error) {
 	return Complete, nil
 }
 
+// noDirectory reports whether err, from a path under a resource's directory,
+// says that what sits there is not a directory: a file, or a link loop. That
+// holds no resource, the same as a directory with no sentinel.
+func noDirectory(err error) bool {
+	return errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP)
+}
+
+// ErrAdopt covers taking over a directory another writer seeded.
+var ErrAdopt = errors.New("adopting a seeded cache directory failed")
+
+// ReadRecord reads the record from the sentinel of the named resource's
+// directory. It is meant for a directory State reported Complete.
+func (s Store) ReadRecord(cachePath, name string) (Record, error) {
+	sn, err := s.readSentinel(cachePath, name)
+	if err != nil {
+		return Record{}, err
+	}
+	return sn.Record, nil
+}
+
+// Adopt makes the agent the owner of a directory another writer seeded,
+// leaving its content and the rest of the sentinel as they are. From then on
+// the directory is the agent's to refresh and to collect.
+//
+// The sentinel is rewritten through a temporary file renamed over it, so a
+// crash leaves either the old owner or the new one, never a sentinel half
+// written, which State would read as an incomplete resource to pull again.
+func (s Store) Adopt(cachePath, name string) error {
+	sn, err := s.readSentinel(cachePath, name)
+	if err != nil {
+		return errors.Wrap(ErrAdopt, errors.CausedBy(err), errors.WithProperty("resource", name))
+	}
+	sn.Owner = OwnerAgent
+	data, err := json.Marshal(sn)
+	if err != nil {
+		return errors.Wrap(ErrAdopt, errors.CausedBy(err), errors.WithProperty("resource", name))
+	}
+	path := filepath.Join(s.dir(cachePath, name), SentinelName)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return errors.Wrap(ErrAdopt, errors.CausedBy(err),
+			errors.WithDetail("writing the new sentinel"), errors.WithProperty("resource", name))
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return utilerrors.NewAggregate([]error{
+			errors.Wrap(ErrAdopt, errors.CausedBy(err),
+				errors.WithDetail("replacing the sentinel"), errors.WithProperty("resource", name)),
+			os.Remove(tmp),
+		})
+	}
+	return nil
+}
+
+func (s Store) readSentinel(cachePath, name string) (sentinel, error) {
+	data, err := os.ReadFile(filepath.Join(s.dir(cachePath, name), SentinelName))
+	if err != nil {
+		return sentinel{}, errors.Wrap(ErrState, errors.CausedBy(err), errors.WithProperty("resource", name))
+	}
+	var sn sentinel
+	if err := json.Unmarshal(data, &sn); err != nil {
+		return sentinel{}, errors.Wrap(ErrState, errors.CausedBy(err),
+			errors.WithDetail("the sentinel does not parse"), errors.WithProperty("resource", name))
+	}
+	return sn, nil
+}
+
 // Extract writes the regular files of the tar stream into the resource
 // directory, flattened to their base names, skipping directories and refusing
 // the whole stream on any other kind of entry, then the sentinel, then swaps
@@ -98,11 +193,13 @@ func (s Store) State(cachePath, name string) (State, error) {
 // the resource Absent; the next pass redoes the extraction. Extract must not
 // be called concurrently for the same name. A failed extraction leaves either
 // the previous state or a hidden temporary directory that GC removes later.
+// The temporary directory is locked while it is written, so that GC and
+// SweepTemporaries, in this process or another, leave it alone.
 //
 // Every read honours ctx, inside an entry too: an entry can be hundreds of
 // megabytes, and nothing else watches ctx when the source is a local archive.
 func (s Store) Extract(
-	ctx context.Context, cachePath, name, digest string, content io.Reader,
+	ctx context.Context, cachePath, name string, rec Record, content io.Reader,
 ) (err error) {
 	tmp, err := os.MkdirTemp(cachePath, "."+name+".tmp-")
 	if err != nil {
@@ -115,6 +212,14 @@ func (s Store) Extract(
 			err = utilerrors.NewAggregate([]error{err, os.RemoveAll(tmp)})
 		}
 	}()
+	lock, err := lockTemporary(tmp)
+	if err != nil {
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("locking the temporary directory"),
+			errors.WithProperty("resource", name))
+	}
+	// Read-only handle, kept for the lock: a close error loses nothing.
+	defer func() { _ = lock.Close() }()
 
 	var files []string
 	tr := tar.NewReader(ctxReader{ctx: ctx, r: content})
@@ -126,7 +231,7 @@ func (s Store) Extract(
 		// Identity, not errors.Is. archive/tar ends an archive with io.EOF
 		// itself, while a failure upstream can wrap one: a registry closing
 		// the connection before a layer comes back as Get "...": EOF. Taken
-		// for the end, it published whatever the earlier layers held as a
+		// for the end, it would publish whatever the earlier layers held as a
 		// complete resource, the rest silently missing.
 		if rerr == io.EOF { //nolint:errorlint // see above: only the unwrapped value means the end
 			break
@@ -170,7 +275,7 @@ func (s Store) Extract(
 			return errors.Wrap(ErrExtract,
 				errors.WithDetailf("%q has no file name", hdr.Name))
 		}
-		if base == sentinelName {
+		if base == SentinelName {
 			continue
 		}
 		out, oerr := os.OpenFile(filepath.Join(tmp, base), os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
@@ -205,17 +310,17 @@ func (s Store) Extract(
 			errors.WithDetail("the image carries no file to cache"))
 	}
 
-	data, err := json.Marshal(sentinel{Digest: digest, Files: files})
+	data, err := json.Marshal(sentinel{Record: rec, Files: files})
 	if err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("encoding the sentinel"))
 	}
-	if err = os.WriteFile(filepath.Join(tmp, sentinelName), data, 0o644); err != nil {
+	if err = os.WriteFile(filepath.Join(tmp, SentinelName), data, 0o644); err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("writing the sentinel"))
 	}
 	final := s.dir(cachePath, name)
-	if err = s.replaceable(final, name); err != nil {
+	if err = s.replaceable(final, name, rec.Owner); err != nil {
 		return err
 	}
 	if err = os.RemoveAll(final); err != nil {
@@ -245,29 +350,57 @@ func entryKind(flag byte) string {
 	}
 }
 
-// replaceable reports whether the swap may remove what is already at final.
-// Only a directory bearing the sentinel may be, which is the same rule GC
-// applies: the cache path is shared, and a name is not a claim on whatever
-// happens to sit under it. Without this, a resource named after a neighbour
-// of the cache path, or a cache path one level too high, turns the swap into
-// an rm -rf of somebody else's data.
-func (s Store) replaceable(final, name string) error {
-	if _, err := os.Stat(final); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
+// Replaceable reports whether an extraction of the named resource, written by
+// owner, may replace what is already in its directory. Extract checks it
+// again at the swap; a caller asks first so that it does not pull an image it
+// could not publish.
+func (s Store) Replaceable(cachePath, name, owner string) error {
+	return s.replaceable(s.dir(cachePath, name), name, owner)
+}
+
+// replaceable reports whether the swap may remove what is at final. A
+// directory with a sentinel always goes, whoever wrote it. Anything else goes
+// only for the agent, which owns the cache path, unless a sentinel is there
+// but cannot be read: the directory may be seeded.
+func (s Store) replaceable(final, name, owner string) error {
+	info, err := os.Lstat(final)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("looking at the directory to replace"),
 			errors.WithProperty("resource", name))
 	}
-	if _, err := os.Stat(filepath.Join(final, sentinelName)); err != nil {
-		return errors.Wrap(ErrExtract,
-			errors.WithDetail("what is already there was not written by this, "+
-				"so it is left alone: remove it by hand if it should go"),
+	if owner == OwnerAgent && !info.IsDir() {
+		return nil
+	}
+	_, err = os.Stat(filepath.Join(final, SentinelName))
+	if noDirectory(err) {
+		err = os.ErrNotExist
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Unreadable is not absent: a permission error here points at who
+		// owns the directory, not at what it holds.
+		return errors.Wrap(ErrExtract, errors.CausedBy(err),
+			errors.WithDetail("reading the sentinel of the directory to replace"),
 			errors.WithProperty("resource", name),
 			errors.WithProperty("directory", final))
 	}
-	return nil
+	if err == nil || owner == OwnerAgent {
+		return nil
+	}
+	return errors.Wrap(ErrExtract,
+		errors.WithDetail("what is already there was not written by this, "+
+			"so it is left alone: remove it by hand if it should go"),
+		errors.WithProperty("resource", name),
+		errors.WithProperty("directory", final))
+}
+
+// IsTemporary reports whether name is the directory an extraction writes
+// before its rename.
+func IsTemporary(name string) bool {
+	return strings.HasPrefix(name, ".") && strings.Contains(name, ".tmp-")
 }
 
 // SweepTemporaries removes the hidden temporary directories a previous
@@ -275,8 +408,7 @@ func (s Store) replaceable(final, name string) error {
 // cleans up after itself when it returns an error, but not when the process
 // is killed outright, and a leftover is the size of the image being written.
 //
-// Scoped to one name because a run for another resource may be in flight:
-// GC, which the agent calls, is the one that sweeps them all.
+// A locked one belongs to a run still in flight, and stays.
 func (s Store) SweepTemporaries(cachePath, name string) ([]string, error) {
 	entries, err := os.ReadDir(cachePath)
 	if err != nil {
@@ -290,20 +422,82 @@ func (s Store) SweepTemporaries(cachePath, name string) ([]string, error) {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
 			continue
 		}
-		if rerr := os.RemoveAll(filepath.Join(cachePath, e.Name())); rerr != nil {
+		ok, rerr := removeTemporary(filepath.Join(cachePath, e.Name()))
+		if rerr != nil {
 			errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(rerr),
 				errors.WithProperty("directory", e.Name())))
 			continue
 		}
-		removed = append(removed, e.Name())
+		if ok {
+			removed = append(removed, e.Name())
+		}
 	}
 	return removed, utilerrors.NewAggregate(errs)
 }
 
-// GC removes agent-owned directories (sentinel-bearing, plus stale hidden
-// temporaries) under cachePath whose name is not in keep. Flat files and
-// foreign directories survive. Returns the removed names.
-func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
+// lockTemporary takes an exclusive lock on the temporary directory dir. The
+// lock lasts until the returned file is closed, or the process dies. GC may
+// remove dir between its creation and the lock, so dir is checked again once
+// locked.
+func lockTemporary(dir string) (*os.File, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		return nil, utilerrors.NewAggregate([]error{err, f.Close()})
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return nil, utilerrors.NewAggregate([]error{err, f.Close()})
+	}
+	return f, nil
+}
+
+// removeTemporary removes the temporary directory dir and reports whether it
+// did. It leaves dir alone while an extraction holds its lock.
+func removeTemporary(dir string) (bool, error) {
+	f, err := os.Open(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, os.RemoveAll(dir)
+}
+
+// seeded reports whether a writer other than the agent wrote dir: content
+// waiting for the resource that adopts it. A missing sentinel or one that does
+// not parse is not seeded. A sentinel that cannot be read is an error: the
+// directory may be seeded, and removing it would lose content an air-gapped
+// node cannot fetch again.
+func (Store) seeded(dir string) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(dir, SentinelName))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var sn sentinel
+	if json.Unmarshal(data, &sn) != nil {
+		return false, nil
+	}
+	return sn.Owner != OwnerAgent, nil
+}
+
+// GC removes the entries under cachePath that keep does not name, and
+// returns their names. A few stay: "Cache layout" in agent/DESIGN.md lists
+// them and why.
+func (s Store) GC(cachePath string, keep map[string]bool) (removed []string, err error) {
 	entries, err := os.ReadDir(cachePath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -312,21 +506,43 @@ func (s Store) GC(cachePath string, keep map[string]bool) ([]string, error) {
 		return nil, errors.Wrap(ErrGC, errors.CausedBy(err),
 			errors.WithDetail("listing the cache path"))
 	}
-	var removed []string
 	var errs []error
 	for _, e := range entries {
-		if !e.IsDir() || keep[e.Name()] {
+		if keep[e.Name()] || e.Type().IsRegular() || e.Name() == lostFound {
 			continue
 		}
-		stale := strings.HasPrefix(e.Name(), ".") && strings.Contains(e.Name(), ".tmp-")
-		if !stale {
-			if _, err := os.Stat(filepath.Join(cachePath, e.Name(), sentinelName)); err != nil {
+		path := filepath.Join(cachePath, e.Name())
+		// An interrupted extraction goes whoever started it, once nobody
+		// writes it any more. Its sentinel, written before the rename, does
+		// not make it seeded.
+		if e.IsDir() && IsTemporary(e.Name()) {
+			ok, err := removeTemporary(path)
+			if err != nil {
+				errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),
+					errors.WithProperty("entry", e.Name())))
+				continue
+			}
+			if ok {
+				removed = append(removed, e.Name())
+			}
+			continue
+		}
+		if e.IsDir() {
+			seeded, err := s.seeded(path)
+			if err != nil {
+				errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),
+					errors.WithDetail("reading the sentinel, so the directory is kept"),
+					errors.WithProperty("entry", e.Name())))
+				continue
+			}
+			if seeded {
 				continue
 			}
 		}
-		if err := os.RemoveAll(filepath.Join(cachePath, e.Name())); err != nil {
+		// A link goes, not what it points to.
+		if err := os.RemoveAll(path); err != nil {
 			errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),
-				errors.WithProperty("directory", e.Name())))
+				errors.WithProperty("entry", e.Name())))
 			continue
 		}
 		removed = append(removed, e.Name())

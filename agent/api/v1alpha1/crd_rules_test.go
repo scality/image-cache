@@ -25,21 +25,18 @@ import (
 
 const crdPath = "../../config/crd/bases/image-cache.scality.com_imagecaches.yaml"
 
-// See the constants in imagecache_types.go for why this test exists. A drift
-// would otherwise only show on a node: the command would reject a name the
-// API server accepts, or write a directory under a name no resource can carry.
+// See ResourceNameMax in imagecache_types.go for why this test exists. A
+// drift would otherwise only show on a node: the command would reject a name
+// the API server accepts, or write a directory under a name no resource can
+// carry.
 func TestGeneratedCRDMatchesTheExportedLimits(t *testing.T) {
 	crd, err := os.ReadFile(crdPath)
 	if err != nil {
 		t.Fatalf("reading the generated CRD: %v", err)
 	}
-	for _, want := range []string{
-		fmt.Sprintf("size(self.metadata.name) <= %d", ResourceNameMax),
-		fmt.Sprintf("!self.contains(''%s'')", CachePathParent),
-	} {
-		if !strings.Contains(string(crd), want) {
-			t.Errorf("the generated CRD no longer carries %q; run `make manifests` "+
-				"or bring the constant back in line with the marker", want)
-		}
+	want := fmt.Sprintf("size(self.metadata.name) <= %d", ResourceNameMax)
+	if !strings.Contains(string(crd), want) {
+		t.Errorf("the generated CRD no longer carries %q; run `make manifests` "+
+			"or bring the constant back in line with the marker", want)
 	}
 }

@@ -56,7 +56,7 @@ var (
 	k8sClient client.Client
 
 	// cacheDir is a suite-level temporary directory standing in for the
-	// host cache path: every test ImageCache sets spec.cachePath to it.
+	// host cache path: it is the suite reconciler's CachePath.
 	cacheDir string
 	// testPuller is the manager's puller; tests toggle testPuller.fail to
 	// exercise the sync failure path.
@@ -127,11 +127,12 @@ var _ = BeforeSuite(func() {
 
 	testPuller = &fakePuller{}
 	Expect((&NodeReconciler{
-		Client:   mgr.GetClient(),
-		Recorder: mgr.GetEventRecorder("image-cache-agent-test"),
-		NodeName: testNodeName,
-		Puller:   testPuller,
-		Resync:   0,
+		Client:    mgr.GetClient(),
+		Recorder:  mgr.GetEventRecorder("image-cache-agent-test"),
+		NodeName:  testNodeName,
+		CachePath: cacheDir,
+		Puller:    testPuller,
+		Resync:    0,
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	go func() {

@@ -62,11 +62,11 @@ maintain it.
 ```
 
 The preload service imports the flat tarballs and those one level down, which
-covers both writers. The agent works exclusively inside its own
-subdirectories, one per resource. It deletes a directory only when that
-directory carries its sentinel, or when the name marks it as one of its own
-interrupted extractions (hidden, and holding `.tmp-`), so a cache shared with
-provisioning tooling is safe from it.
+covers both writers. The agent and the command write inside their own
+subdirectories, one per resource. The agent removes what no resource keeps,
+except flat files and directories `imagecachectl` seeded;
+[agent/DESIGN.md](agent/DESIGN.md#cache-layout) has the full rule.
+
 A subdirectory per resource also lets two versions of the same content coexist
 during an upgrade, where flat tarballs would collide on identical file names.
 
@@ -90,10 +90,10 @@ The architecture is the one exception. Every part targets `linux/amd64`: the
 preload service imports with that platform by default, the agent image is
 built for it alone, and the DaemonSet carries a matching `nodeSelector` so it
 stays off nodes it could not run on. The command's package is built for
-x86_64 alone, and the command refuses an archive that declares another
-platform. A node selected by an `ImageCache` but not
-by the agent never reports a label, so a mixed cluster needs a selector that
-says so.
+x86_64 alone. The agent and the command refuse an image that declares
+another platform, from a registry or an archive. A node selected by an
+`ImageCache` but not by the agent never reports a label, so a mixed cluster
+needs a selector that says so.
 
 Out of scope, deliberately:
 

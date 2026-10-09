@@ -21,19 +21,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// Limits the CRD enforces, exported so that anything writing a cache
-// directory outside the API server validates against the same numbers and
-// the same rules. The kubebuilder markers below are comments and cannot read
-// these, so a test asserts the generated CRD still matches them.
-const (
-	// ResourceNameMax is the longest name an ImageCache may carry. The name
-	// becomes a node label name, which Kubernetes caps at 63 characters.
-	ResourceNameMax = 63
-
-	// CachePathParent is refused anywhere in cachePath, as a plain substring
-	// and not a path segment, which is what the CEL rule does.
-	CachePathParent = ".."
-)
+// ResourceNameMax is the longest name an ImageCache may carry. The name
+// becomes a node label name, which Kubernetes caps at 63 characters. It is
+// exported so that anything writing a cache directory outside the API server
+// validates against the same number. The kubebuilder marker below is a
+// comment and cannot read it, so a test asserts the generated CRD still
+// matches it.
+const ResourceNameMax = 63
 
 // ImageCacheSpec defines the desired state of ImageCache.
 type ImageCacheSpec struct {
@@ -54,22 +48,11 @@ type ImageCacheSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.matches('^([a-zA-Z0-9][a-zA-Z0-9.-]*(:[0-9]+)?/)?[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-zA-Z0-9_][a-zA-Z0-9._-]*)?(@sha256:[a-f0-9]{64})?$')",message="source must be a container image reference, of the form registry[:port]/repository[:tag][@sha256:<digest>]"
 	// +required
 	Source string `json:"source"`
-
-	// cachePath is the host directory under which the tarballs are
-	// extracted, in a subdirectory named after this resource. It must
-	// start with '/' and must not contain the substring '..' anywhere
-	// (a plain substring check, not path-segment parsing).
-	// +kubebuilder:default=/var/lib/image-cache
-	// +kubebuilder:validation:Pattern=`^/`
-	// +kubebuilder:validation:XValidation:rule="!self.contains('..')",message="cachePath must not contain '..'"
-	// +optional
-	CachePath string `json:"cachePath,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="Source",type=string,JSONPath=`.spec.source`
-// +kubebuilder:printcolumn:name="CachePath",type=string,JSONPath=`.spec.cachePath`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="name must not exceed 63 characters: it is used as a node label name"
 

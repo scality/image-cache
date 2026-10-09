@@ -17,13 +17,10 @@ import (
 
 	"github.com/scality/image-cache/agent/api/v1alpha1"
 	"github.com/scality/image-cache/agent/internal/cache"
+	"github.com/scality/image-cache/agent/internal/fill"
 	"github.com/scality/image-cache/agent/internal/puller"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
-
-// ErrCachePath covers a cache directory the command cannot write into. The
-// other failures already carry the sentinel of the package they come from.
-var ErrCachePath = errors.New("the cache path is not usable")
 
 // printf writes a message out. A failure to write one is not something the
 // command can act on, and returning it would hide the error it was about to
@@ -36,6 +33,9 @@ func printf(w io.Writer, format string, args ...any) {
 // caller turns it into 128 plus the signal it caught, which is what a shell
 // reports: 130 for SIGINT, 143 for SIGTERM.
 const ExitInterrupted = 130
+
+// Owner is the owner the command writes in a sentinel.
+const Owner = "imagecachectl"
 
 const importLong = `Fills the image cache with the archives a boot cache image carries.
 
@@ -117,9 +117,10 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 
 // validate checks what the store takes on trust. The store joins the name to
 // the cache path, and the command runs as root on a node: `..` in either
-// walks out of the cache. Both follow the rules the CRD applies, so what this
-// accepts is what an ImageCache can carry. The name also becomes a node label,
-// hence the 63 characters.
+// walks out of the cache. The name follows the rules the CRD applies, so what
+// this accepts is what an ImageCache can carry. It also becomes a node label,
+// hence the 63 characters. The cache path follows fill.ValidCachePath, like
+// the agent's.
 func validate(name, cachePath string) error {
 	problems := validation.IsDNS1123Subdomain(name)
 	if len(name) > v1alpha1.ResourceNameMax {
@@ -129,9 +130,9 @@ func validate(name, cachePath string) error {
 	if len(problems) > 0 {
 		return fmt.Errorf("--name %q is not a resource name: %s", name, strings.Join(problems, "; "))
 	}
-	if !filepath.IsAbs(cachePath) || strings.Contains(cachePath, v1alpha1.CachePathParent) {
+	if !fill.ValidCachePath(cachePath) {
 		return fmt.Errorf("--cache-path %q is not a cache path: must be absolute and must not contain %q",
-			cachePath, v1alpha1.CachePathParent)
+			cachePath, "..")
 	}
 	return nil
 }
@@ -154,20 +155,8 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out
 	// named as one. Asking the store first would report a path that is a
 	// regular file, or one that cannot be listed, as a failure to read the
 	// cache state, which sends the reader looking at the wrong thing.
-	//
-	// Refused rather than created. On a node the directory is usually a mount,
-	// and creating it where the mount failed would fill the root filesystem
-	// with something nothing reads. Making it is the caller's call, and the
-	// message says so rather than assuming which of the two went wrong.
-	switch info, serr := os.Stat(cachePath); {
-	case serr != nil:
-		return errors.Wrap(ErrCachePath, errors.CausedBy(serr),
-			errors.WithDetail("create it, or check the mount that should provide it"),
-			errors.WithProperty("cachePath", cachePath))
-	case !info.IsDir():
-		return errors.Wrap(ErrCachePath,
-			errors.WithDetail("it is not a directory"),
-			errors.WithProperty("cachePath", cachePath))
+	if err := fill.CheckCachePath(cachePath); err != nil {
+		return err
 	}
 
 	// Answered from the disk alone. A node that already holds the archives
@@ -186,8 +175,6 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out
 	// the size of a whole boot cache image. The agent's garbage collection
 	// clears those, but this command exists for a node that has no agent, so
 	// every interrupted attempt would otherwise stay on the disk for good.
-	// Only this resource's own leftovers, since a run for another name may be
-	// in flight.
 	swept, err := store.SweepTemporaries(cachePath, name)
 	if err != nil {
 		return err
@@ -196,25 +183,11 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out
 		printf(out, "cleared %d leftover directory from an interrupted run\n", len(swept))
 	}
 
-	content, digest, err := src.Pull(ctx, source)
-	if err != nil {
+	if err := fill.Fill(ctx, store, src, cachePath, name, source, Owner, func(cerr error) {
+		printf(errOut, "imagecachectl: closing the image stream: %s\n", cerr)
+	}); err != nil {
 		return err
 	}
-	extracted := false
-	defer func() {
-		cerr := content.Close()
-		// Only worth a word when the extraction went through: otherwise the
-		// error below says what happened, and a note about the stream just
-		// before it would claim the run did what it was asked.
-		if cerr != nil && extracted {
-			printf(errOut, "imagecachectl: closing the image stream: %s\n", cerr)
-		}
-	}()
-
-	if err := store.Extract(ctx, cachePath, name, digest, content); err != nil {
-		return err
-	}
-	extracted = true
 	printf(out, "extracted %s into %s\n", name, filepath.Join(cachePath, name))
 	return nil
 }

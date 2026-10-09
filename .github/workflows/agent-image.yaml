@@ -14,10 +14,13 @@ on:
         default: false
         type: boolean
 
-# One publish at a time: latest-dev is moved by both a merge to main and a
-# pre-release, and the last run to finish must be the newest.
+# One publish at a time per ref. GitHub keeps only one pending run per group
+# and cancels it when a newer one arrives, so a shared group could drop a
+# release build. Merges to main still run in order. A pre-release can race
+# with a merge to main on latest-dev: if it finishes last, latest-dev points
+# to the pre-release until the next merge that touches agent/.
 concurrency:
-  group: agent-image
+  group: agent-image-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:

@@ -30,7 +30,7 @@ const (
 	helpFlag     = "--help"
 	etcdTarPath  = "images/etcd.tar"
 	pauseTarPath = "images/pause.tar"
-	sentinelName = ".image-cache-agent.json"
+	SentinelName = ".image-cache-agent.json"
 )
 
 // archive writes a docker archive shaped like a boot cache image.
@@ -85,7 +85,7 @@ func TestImportFromAnArchive(t *testing.T) {
 	if string(got) != "etcd" {
 		t.Errorf("etcd.tar = %q, want %q", got, "etcd")
 	}
-	if _, err := os.Stat(filepath.Join(cacheDir, resourceName, sentinelName)); err != nil {
+	if _, err := os.Stat(filepath.Join(cacheDir, resourceName, SentinelName)); err != nil {
 		t.Errorf("no sentinel written: %v", err)
 	}
 }
@@ -105,7 +105,7 @@ func TestImportFromARegistry(t *testing.T) {
 	if string(got) != "pause" {
 		t.Errorf("pause.tar = %q, want %q", got, "pause")
 	}
-	if _, err := os.Stat(filepath.Join(cacheDir, resourceName, sentinelName)); err != nil {
+	if _, err := os.Stat(filepath.Join(cacheDir, resourceName, SentinelName)); err != nil {
 		t.Errorf("no sentinel written: %v", err)
 	}
 }
@@ -674,7 +674,7 @@ type recorded struct {
 
 func readSentinel(t *testing.T, cacheDir string) recorded {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(cacheDir, resourceName, sentinelName))
+	data, err := os.ReadFile(filepath.Join(cacheDir, resourceName, SentinelName))
 	if err != nil {
 		t.Fatal(err)
 	}

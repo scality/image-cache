@@ -177,7 +177,10 @@ Triggers:
   resource directories under it: fsnotify is not recursive, and a watch on
   the cache path alone would report a whole resource directory disappearing
   but not a single tarball deleted inside one. Watchers are adjusted after
-  each pass as resource directories come and go.
+  each pass as resource directories come and go. Temporary directories are
+  not watched, and writes are ignored except to a sentinel: a pass reads the
+  sentinel and checks that the files it lists exist, and an extraction by
+  another process would otherwise trigger one pass per write.
 - A periodic resync as a safety net, every hour by default
   (`--resync-period`). It is not what retries a failed pass, which is
   requeued with backoff, nor what repairs tampering, which raises a

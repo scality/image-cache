@@ -92,7 +92,7 @@ func TestExtractFlattensAndCompletes(t *testing.T) {
 	if err := s.Extract(t.Context(), dir, "worker-134-0-0", Record{Digest: testDigest}, stream); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{"etcd.tar", "pause.tar", sentinelName} {
+	for _, f := range []string{"etcd.tar", "pause.tar", SentinelName} {
 		if _, err := os.Stat(filepath.Join(dir, "worker-134-0-0", f)); err != nil {
 			t.Errorf("missing %s: %v", f, err)
 		}
@@ -119,12 +119,12 @@ func TestExtractIgnoresAnImagesOwnSentinel(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
 	stream := tarStream(t, map[string]string{
 		etcdEntry:                "e",
-		"images/" + sentinelName: `{"digest":"sha256:evil","files":["etcd.tar"]}`,
+		"images/" + SentinelName: `{"digest":"sha256:evil","files":["etcd.tar"]}`,
 	})
 	if err := s.Extract(t.Context(), dir, "c", Record{Digest: testDigest}, stream); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "c", sentinelName))
+	data, err := os.ReadFile(filepath.Join(dir, "c", SentinelName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func TestGCRemovesWhatNoResourceKeeps(t *testing.T) {
 	if err := os.MkdirAll(seededTmp, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(seededTmp, sentinelName), []byte(`{"owner":"`+otherOwner+`"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(seededTmp, SentinelName), []byte(`{"owner":"`+otherOwner+`"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "boot.tar"), []byte("b"), 0o644); err != nil {
@@ -445,7 +445,7 @@ func TestStateCorruptSentinel(t *testing.T) {
 	if err := s.Extract(t.Context(), dir, "c", Record{Digest: "d"}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "c", sentinelName), []byte("{not json"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "c", SentinelName), []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	st, err := s.State(dir, "c")
@@ -477,7 +477,7 @@ func TestExtractReplacesExistingDir(t *testing.T) {
 	if st, _ := s.State(dir, "r"); st != Complete {
 		t.Errorf("second extraction: state = %v, want Complete", st)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "r", sentinelName))
+	data, err := os.ReadFile(filepath.Join(dir, "r", SentinelName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +647,7 @@ func TestExtractRecordsWhoWroteTheDirectoryAndFromWhat(t *testing.T) {
 	if err := s.Extract(t.Context(), dir, "c", rec, tarStream(t, map[string]string{testTar: "1"})); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "c", sentinelName))
+	data, err := os.ReadFile(filepath.Join(dir, "c", SentinelName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +680,7 @@ func TestGCLeavesADirectoryAnotherWriterOwns(t *testing.T) {
 			if err := os.MkdirAll(res, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(res, sentinelName), []byte(tc.sentinel), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(res, SentinelName), []byte(tc.sentinel), 0o644); err != nil {
 				t.Fatal(err)
 			}
 
@@ -724,7 +724,7 @@ func TestAdoptOnlyChangesTheOwner(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(dir, "c", testTar)); err != nil || string(data) != "1" {
 		t.Errorf("content = %q, %v; want it untouched", data, err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "c", sentinelName+".tmp")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "c", SentinelName+".tmp")); !os.IsNotExist(err) {
 		t.Errorf("the temporary sentinel is left behind: %v", err)
 	}
 }
@@ -834,7 +834,7 @@ func TestReplaceableTellsAnUnreadableSentinelFromAMissingOne(t *testing.T) {
 	if err := os.MkdirAll(res, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(res, sentinelName), []byte("{}"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(res, SentinelName), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(res, 0o600); err != nil {
@@ -854,7 +854,7 @@ func TestGCKeepsADirectoryWhoseSentinelCannotBeRead(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
 	res := filepath.Join(dir, "worker-134-0-0")
 	// A sentinel that is a directory cannot be read, even by root.
-	if err := os.MkdirAll(filepath.Join(res, sentinelName), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(res, SentinelName), 0o755); err != nil {
 		t.Fatal(err)
 	}
 

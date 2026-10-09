@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
+	"github.com/scality/image-cache/agent/internal/cache"
 )
 
 // FSWatcher turns filesystem changes under the cache path into reconcile
@@ -67,9 +68,15 @@ func (f *FSWatcher) Start(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case _, ok := <-f.watcher.Events:
+		case ev, ok := <-f.watcher.Events:
 			if !ok {
 				return f.closed(ctx)
+			}
+			// A pass reads the sentinel and checks that the files it lists
+			// exist. A write to any other file cannot change its result, and
+			// an extraction writes thousands of times.
+			if ev.Op == fsnotify.Write && filepath.Base(ev.Name) != cache.SentinelName {
+				continue
 			}
 			select {
 			case f.Events <- f.trigger:
@@ -124,7 +131,10 @@ func (f *FSWatcher) SetPaths(roots []string) {
 			continue
 		}
 		for _, e := range entries {
-			if e.IsDir() {
+			// An extraction writes its temporary directory for as long as the
+			// pull lasts, and nothing in it matters before the rename, which
+			// the root reports.
+			if e.IsDir() && !cache.IsTemporary(e.Name()) {
 				want[filepath.Join(root, e.Name())] = true
 			}
 		}

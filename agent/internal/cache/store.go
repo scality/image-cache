@@ -22,9 +22,9 @@ import (
 // it: change them together.
 const DefaultPath = "/var/lib/image-cache"
 
-// sentinelName marks a directory as fully extracted by the store, and names
+// SentinelName marks a directory as fully extracted by the store, and names
 // who wrote it. It is written last.
-const sentinelName = ".image-cache-agent.json"
+const SentinelName = ".image-cache-agent.json"
 
 // Failures of this package are classified by these sentinels. Filesystem and
 // archive errors are stamped with one where they enter, because a foreign
@@ -91,7 +91,7 @@ func (Store) dir(cachePath, name string) string { return filepath.Join(cachePath
 // check the returned error before trusting the State: a filesystem error
 // (e.g. permission denied) is reported alongside the zero value Absent.
 func (s Store) State(cachePath, name string) (State, error) {
-	data, err := os.ReadFile(filepath.Join(s.dir(cachePath, name), sentinelName))
+	data, err := os.ReadFile(filepath.Join(s.dir(cachePath, name), SentinelName))
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		if _, serr := os.Stat(s.dir(cachePath, name)); errors.Is(serr, os.ErrNotExist) {
@@ -156,7 +156,7 @@ func (s Store) Adopt(cachePath, name string) error {
 	if err != nil {
 		return errors.Wrap(ErrAdopt, errors.CausedBy(err), errors.WithProperty("resource", name))
 	}
-	path := filepath.Join(s.dir(cachePath, name), sentinelName)
+	path := filepath.Join(s.dir(cachePath, name), SentinelName)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return errors.Wrap(ErrAdopt, errors.CausedBy(err),
@@ -173,7 +173,7 @@ func (s Store) Adopt(cachePath, name string) error {
 }
 
 func (s Store) readSentinel(cachePath, name string) (sentinel, error) {
-	data, err := os.ReadFile(filepath.Join(s.dir(cachePath, name), sentinelName))
+	data, err := os.ReadFile(filepath.Join(s.dir(cachePath, name), SentinelName))
 	if err != nil {
 		return sentinel{}, errors.Wrap(ErrState, errors.CausedBy(err), errors.WithProperty("resource", name))
 	}
@@ -275,7 +275,7 @@ func (s Store) Extract(
 			return errors.Wrap(ErrExtract,
 				errors.WithDetailf("%q has no file name", hdr.Name))
 		}
-		if base == sentinelName {
+		if base == SentinelName {
 			continue
 		}
 		out, oerr := os.OpenFile(filepath.Join(tmp, base), os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
@@ -315,7 +315,7 @@ func (s Store) Extract(
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("encoding the sentinel"))
 	}
-	if err = os.WriteFile(filepath.Join(tmp, sentinelName), data, 0o644); err != nil {
+	if err = os.WriteFile(filepath.Join(tmp, SentinelName), data, 0o644); err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("writing the sentinel"))
 	}
@@ -375,7 +375,7 @@ func (s Store) replaceable(final, name, owner string) error {
 	if owner == OwnerAgent && !info.IsDir() {
 		return nil
 	}
-	_, err = os.Stat(filepath.Join(final, sentinelName))
+	_, err = os.Stat(filepath.Join(final, SentinelName))
 	if noDirectory(err) {
 		err = os.ErrNotExist
 	}
@@ -395,6 +395,12 @@ func (s Store) replaceable(final, name, owner string) error {
 			"so it is left alone: remove it by hand if it should go"),
 		errors.WithProperty("resource", name),
 		errors.WithProperty("directory", final))
+}
+
+// IsTemporary reports whether name is the directory an extraction writes
+// before its rename.
+func IsTemporary(name string) bool {
+	return strings.HasPrefix(name, ".") && strings.Contains(name, ".tmp-")
 }
 
 // SweepTemporaries removes the hidden temporary directories a previous
@@ -474,7 +480,7 @@ func removeTemporary(dir string) (bool, error) {
 // directory may be seeded, and removing it would lose content an air-gapped
 // node cannot fetch again.
 func (Store) seeded(dir string) (bool, error) {
-	data, err := os.ReadFile(filepath.Join(dir, sentinelName))
+	data, err := os.ReadFile(filepath.Join(dir, SentinelName))
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -509,7 +515,7 @@ func (s Store) GC(cachePath string, keep map[string]bool) (removed []string, err
 		// An interrupted extraction goes whoever started it, once nobody
 		// writes it any more. Its sentinel, written before the rename, does
 		// not make it seeded.
-		if e.IsDir() && strings.HasPrefix(e.Name(), ".") && strings.Contains(e.Name(), ".tmp-") {
+		if e.IsDir() && IsTemporary(e.Name()) {
 			ok, err := removeTemporary(path)
 			if err != nil {
 				errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),

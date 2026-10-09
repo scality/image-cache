@@ -95,19 +95,18 @@ happens when an import fails, and how the package is built.
 
 ### The agent
 
-Build the image, then deploy: `deploy` applies the CRD along with the rest. No
-image is published yet, so the first step is yours.
+The image is published at `ghcr.io/scality/image-cache-agent`. Deploy it:
+`deploy` applies the CRD along with the rest.
 
 ```console
-make -C agent docker-build docker-push IMG=<your-registry>/image-cache-agent:<tag>
-make -C agent deploy IMG=<your-registry>/image-cache-agent:<tag>
+make -C agent deploy IMG=ghcr.io/scality/image-cache-agent:<tag>
 ```
 
-Those two commands are enough from an amd64 machine, deploying into a
-namespace that enforces the `privileged` Pod Security Standard. Anything else
-takes a step or two, and [agent/README.md](agent/README.md#deploying) has them:
-building for amd64 from another architecture, the label the manifests leave off
-the namespace they create, and the flags, `--resync-period` included.
+That command is enough to deploy into a namespace that enforces the
+`privileged` Pod Security Standard. Anything else takes a step or two, and
+[agent/README.md](agent/README.md#deploying) has them: which image tags exist,
+building your own image, the label the manifests leave off the namespace they
+create, and the flags, `--resync-period` included.
 
 Then declare what each node should cache:
 
@@ -238,9 +237,9 @@ Each component is built and tested independently, and both CI workflows run on
 every pull request, since a required check that never runs leaves the pull
 request waiting forever; on pushes to `main` they are scoped by path.
 
-Releases are not independent yet: a tag cuts one version for the repository,
-and the artifacts attached are the two RPMs, for both EL versions. Publishing
-the agent image is still to come.
+Releases are not independent yet: a tag cuts one version for the repository.
+It attaches the two RPMs, for both EL versions, and publishes the agent image
+under the same tag.
 
 ## Development
 

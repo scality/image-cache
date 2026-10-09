@@ -70,7 +70,7 @@ func main() {
 	var resyncPeriod time.Duration
 	var cachePath string
 	var caFile string
-	var skipVerify bool
+	var skipVerify, plainHTTP bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -100,6 +100,9 @@ func main() {
 			"Read once at startup: restart the agent after rotating it.")
 	flag.BoolVar(&skipVerify, "insecure-skip-tls-verify", false,
 		"Accept any registry certificate. For a test cluster set up by hand only.")
+	flag.BoolVar(&plainHTTP, "plain-http", false,
+		"Allow plain HTTP to every registry. For a registry without TLS. "+
+			"Excludes --ca-file and --insecure-skip-tls-verify.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -207,13 +210,16 @@ func main() {
 
 	// Checked before anything starts: an unusable CA would otherwise surface
 	// as a failed pull on every node and every resource.
-	remote, err := puller.NewRemote(puller.TLS{CAFile: caFile, SkipVerify: skipVerify})
+	remote, err := puller.NewRemote(puller.TLS{CAFile: caFile, SkipVerify: skipVerify, PlainHTTP: plainHTTP})
 	if err != nil {
 		setupLog.Error(err, "unable to set up registry TLS")
 		os.Exit(1)
 	}
 	if skipVerify {
 		setupLog.Info("WARNING: registry certificates are not verified (--insecure-skip-tls-verify)")
+	}
+	if plainHTTP {
+		setupLog.Info("WARNING: registries may be reached over plain HTTP (--plain-http)")
 	}
 
 	fw, err := controller.NewFSWatcher(nodeName)

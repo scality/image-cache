@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -1254,5 +1255,100 @@ func TestNewRemoteRefusesACAWithSkipVerify(t *testing.T) {
 	_, err := NewRemote(TLS{CAFile: caFile, SkipVerify: true})
 	if !errors.Is(err, ErrTLS) {
 		t.Fatalf("err = %v, want ErrTLS", err)
+	}
+}
+
+// plainRegistry serves an in-memory registry over plain HTTP and returns a
+// reference to an image pushed there, and a transport that reaches the
+// server. The reference names example.com for the reason tlsRegistry gives:
+// go-containerregistry already uses HTTP for a loopback registry.
+func plainRegistry(t *testing.T) (ref string, base *http.Transport) {
+	t.Helper()
+	srv := httptest.NewServer(registry.New())
+	t.Cleanup(srv.Close)
+
+	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := strings.TrimPrefix(srv.URL, "http://")
+	if err := crane.Push(img, host+workerRefPath); err != nil {
+		t.Fatal(err)
+	}
+
+	base = remote.DefaultTransport.(*http.Transport).Clone()
+	base.Proxy = nil
+	dialer := &net.Dialer{}
+	base.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return dialer.DialContext(ctx, network, host)
+	}
+	_, port, _ := net.SplitHostPort(host)
+	return "example.com:" + port + workerRefPath, base
+}
+
+func TestRemotePullNeedsPlainHTTPForARegistryWithoutTLS(t *testing.T) {
+	ref, base := plainRegistry(t)
+
+	_, _, err := Remote{transport: base}.Pull(context.Background(), ref)
+	if !errors.Is(err, ErrPull) {
+		t.Fatalf("err = %v, want ErrPull without plain HTTP", err)
+	}
+	// Go's own message for an HTTPS request answered in plain HTTP.
+	if !strings.Contains(err.Error(), "HTTP response to HTTPS client") {
+		t.Errorf("err = %v, want an HTTPS request refused", err)
+	}
+
+	rc, _, err := Remote{transport: base, plainHTTP: true}.Pull(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdrs, err := readAll(t, rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := names(hdrs); !slices.Contains(got, etcdTarPath) {
+		t.Errorf("entries = %v, want %s", got, etcdTarPath)
+	}
+}
+
+// A registry that serves HTTPS stays reachable with plain HTTP allowed. The
+// test server only speaks TLS, so a pull that succeeds went over HTTPS.
+func TestRemotePullWithPlainHTTPStillReachesAnHTTPSRegistry(t *testing.T) {
+	ref, caFile, base := tlsRegistry(t)
+	pool, err := caPool(caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+
+	rc, _, err := Remote{transport: base, plainHTTP: true}.Pull(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readAll(t, rc); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewRemoteWithPlainHTTPKeepsTheDefaultTransport(t *testing.T) {
+	r, err := NewRemote(TLS{PlainHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.transport != nil || !r.plainHTTP {
+		t.Errorf("remote = %+v, want the library default transport and plain HTTP", r)
+	}
+}
+
+func TestNewRemoteRefusesPlainHTTPWithACertificateSetting(t *testing.T) {
+	for label, cfg := range map[string]TLS{
+		"CA file":     {PlainHTTP: true, CAFile: "ca.crt"},
+		"skip verify": {PlainHTTP: true, SkipVerify: true},
+	} {
+		t.Run(label, func(t *testing.T) {
+			if _, err := NewRemote(cfg); !errors.Is(err, ErrTLS) {
+				t.Fatalf("err = %v, want ErrTLS", err)
+			}
+		})
 	}
 }

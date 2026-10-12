@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"path/filepath"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -39,7 +40,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
+	"github.com/scality/image-cache/agent/internal/cache"
 	"github.com/scality/image-cache/agent/internal/controller"
+	"github.com/scality/image-cache/agent/internal/fill"
 	"github.com/scality/image-cache/agent/internal/puller"
 	// +kubebuilder:scaffold:imports
 )
@@ -65,6 +68,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var resyncPeriod time.Duration
+	var cachePath string
 	var caFile string
 	var skipVerify bool
 	var tlsOpts []func(*tls.Config)
@@ -88,6 +92,9 @@ func main() {
 			"backoff, so this only bounds how long a drift that raised no event at all "+
 			"can last. Zero turns the periodic pass off entirely, leaving the agent "+
 			"purely event driven.")
+	flag.StringVar(&cachePath, "cache-path", cache.DefaultPath,
+		"The host directory the agent fills. Each ImageCache is extracted into a "+
+			"subdirectory named after it. Must be absolute and must not contain \"..\".")
 	flag.StringVar(&caFile, "ca-file", "",
 		"A PEM file of CA certificates to trust for registries, on top of the system ones. "+
 			"Read once at startup: restart the agent after rotating it.")
@@ -102,6 +109,13 @@ func main() {
 	// Stack traces belong to programming errors: without this every logged
 	// error, including the expected ones, carries one.
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts), zap.StacktraceLevel(zapcore.PanicLevel)))
+
+	if !fill.ValidCachePath(cachePath) {
+		setupLog.Error(errors.New("--cache-path must be absolute and must not contain \"..\""),
+			"Invalid cache path", "cachePath", cachePath)
+		os.Exit(1)
+	}
+	cachePath = filepath.Clean(cachePath)
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -220,12 +234,13 @@ func main() {
 	}
 
 	if err := (&controller.NodeReconciler{
-		Client:   mgr.GetClient(),
-		Recorder: mgr.GetEventRecorder("image-cache-agent"),
-		NodeName: nodeName,
-		Puller:   remote,
-		FS:       fw,
-		Resync:   resyncPeriod,
+		Client:    mgr.GetClient(),
+		Recorder:  mgr.GetEventRecorder("image-cache-agent"),
+		NodeName:  nodeName,
+		CachePath: cachePath,
+		Puller:    remote,
+		FS:        fw,
+		Resync:    resyncPeriod,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "node")
 		os.Exit(1)

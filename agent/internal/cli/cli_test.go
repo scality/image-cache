@@ -4,12 +4,14 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -28,7 +30,7 @@ const (
 	helpFlag     = "--help"
 	etcdTarPath  = "images/etcd.tar"
 	pauseTarPath = "images/pause.tar"
-	sentinelName = ".image-cache-agent.json"
+	SentinelName = ".image-cache-agent.json"
 )
 
 // archive writes a docker archive shaped like a boot cache image.
@@ -83,7 +85,7 @@ func TestImportFromAnArchive(t *testing.T) {
 	if string(got) != "etcd" {
 		t.Errorf("etcd.tar = %q, want %q", got, "etcd")
 	}
-	if _, err := os.Stat(filepath.Join(cacheDir, resourceName, sentinelName)); err != nil {
+	if _, err := os.Stat(filepath.Join(cacheDir, resourceName, SentinelName)); err != nil {
 		t.Errorf("no sentinel written: %v", err)
 	}
 }
@@ -103,7 +105,7 @@ func TestImportFromARegistry(t *testing.T) {
 	if string(got) != "pause" {
 		t.Errorf("pause.tar = %q, want %q", got, "pause")
 	}
-	if _, err := os.Stat(filepath.Join(cacheDir, resourceName, sentinelName)); err != nil {
+	if _, err := os.Stat(filepath.Join(cacheDir, resourceName, SentinelName)); err != nil {
 		t.Errorf("no sentinel written: %v", err)
 	}
 }
@@ -394,8 +396,8 @@ func TestUnknownCommandIsNamed(t *testing.T) {
 	}
 }
 
-// --cache-path is the other half of the join the store makes, and the CRD
-// validates it for the same reason. A relative or climbing path lands the
+// --cache-path is the other half of the join the store makes, and the agent
+// validates its own for the same reason. A relative or climbing path lands the
 // extraction, and the removal that precedes it, somewhere else entirely.
 func TestCachePathCannotBeRelativeOrClimb(t *testing.T) {
 	src := archive(t, map[string][]byte{etcdTarPath: []byte("etcd")})
@@ -434,15 +436,14 @@ func TestACachePathThatIsNotADirectoryIsNamed(t *testing.T) {
 	}
 }
 
-// The store refuses to replace what it did not write, and the command says so
-// rather than reporting success over content it left alone.
+// The command never replaces a directory with no sentinel, which the agent
+// would: it says so rather than reporting success over content it left alone.
 func TestImportRefusesADirectoryItDidNotWrite(t *testing.T) {
 	cacheDir := t.TempDir()
-	foreign := filepath.Join(cacheDir, resourceName, "storage")
-	if err := os.MkdirAll(foreign, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(cacheDir, resourceName), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	data := filepath.Join(foreign, "data.db")
+	data := filepath.Join(cacheDir, resourceName, "old.tar")
 	if err := os.WriteFile(data, []byte("not ours"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -662,5 +663,55 @@ func TestCAFileAllowsSkipVerifySetToFalse(t *testing.T) {
 		"--ca-file", filepath.Join(t.TempDir(), "absent.crt"), "--insecure-skip-tls-verify=false", path)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
+	}
+}
+
+type recorded struct {
+	Owner  string   `json:"owner"`
+	Source string   `json:"source"`
+	Layers []string `json:"layers"`
+}
+
+func readSentinel(t *testing.T, cacheDir string) recorded {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(cacheDir, resourceName, SentinelName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r recorded
+	if err := json.Unmarshal(data, &r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// The sentinel names the command, the source and the layers. The archive and
+// the registry record the same layers for the same image.
+func TestImportRecordsTheSameImageWhateverTheSource(t *testing.T) {
+	files := map[string][]byte{etcdTarPath: []byte("etcd")}
+	archivePath := archive(t, files)
+	registryRef := served(t, files)
+
+	sources := []string{archivePath, registryRef}
+	layers := make([][]string, 0, len(sources))
+	for _, src := range sources {
+		cacheDir := t.TempDir()
+		if code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, src); code != 0 {
+			t.Fatalf("%s: exit = %d (%s)", src, code, errOut)
+		}
+		r := readSentinel(t, cacheDir)
+		if r.Owner != Owner {
+			t.Errorf("%s: owner = %q, want %q", src, r.Owner, Owner)
+		}
+		if r.Source != src {
+			t.Errorf("source = %q, want %q", r.Source, src)
+		}
+		if len(r.Layers) != 1 || !strings.HasPrefix(r.Layers[0], "sha256:") {
+			t.Errorf("%s: layers = %q, want the image's one diff ID", src, r.Layers)
+		}
+		layers = append(layers, r.Layers)
+	}
+	if !slices.Equal(layers[0], layers[1]) {
+		t.Errorf("the archive recorded %v and the registry %v for the same image", layers[0], layers[1])
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -16,8 +17,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,8 +75,8 @@ func TestRemotePullStreamsTheImageFiles(t *testing.T) {
 		}
 	}()
 	wantDigest, _ := img.Digest()
-	if digest != wantDigest.String() {
-		t.Errorf("digest = %s, want %s", digest, wantDigest)
+	if digest.Digest != wantDigest.String() {
+		t.Errorf("digest = %s, want %s", digest.Digest, wantDigest)
 	}
 	got := map[string]string{}
 	tr := tar.NewReader(rc)
@@ -150,8 +153,8 @@ func TestRemotePullResolvesMultiArchIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if digest != wantDigest.String() {
-		t.Errorf("digest = %s, want %s (amd64 child, not index)", digest, wantDigest)
+	if digest.Digest != wantDigest.String() {
+		t.Errorf("digest = %s, want %s (amd64 child, not index)", digest.Digest, wantDigest)
 	}
 
 	got := map[string]string{}
@@ -233,6 +236,34 @@ func TestRemotePullNoMatchingPlatform(t *testing.T) {
 	}
 }
 
+// WithPlatform only filters an index. A tag pointing at a single arm64
+// manifest must be refused all the same.
+func TestRemotePullRefusesASingleManifestOfAnotherPlatform(t *testing.T) {
+	srv := httptest.NewServer(registry.New())
+	defer srv.Close()
+
+	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(arm64Arch)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := strings.TrimPrefix(srv.URL, "http://") + workerRefPath
+	if err := crane.Push(withPlatform(t, img, arm64Arch, linuxOS), ref); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = (Remote{}).Pull(context.Background(), ref)
+	if !errors.Is(err, ErrPull) {
+		t.Fatalf("Pull: err = %v, want ErrPull", err)
+	}
+	if !strings.Contains(err.Error(), "arm64") || !strings.Contains(err.Error(), "amd64") {
+		t.Errorf("err = %v, want both architectures named", err)
+	}
+	// Adoption resolves the source without pulling it.
+	if _, err := (Remote{}).Resolve(context.Background(), ref); !errors.Is(err, ErrPull) {
+		t.Errorf("Resolve: err = %v, want ErrPull", err)
+	}
+}
+
 func TestRemotePullContextCancelled(t *testing.T) {
 	srv := httptest.NewServer(registry.New())
 	defer srv.Close()
@@ -285,8 +316,8 @@ func TestTarballPullStreamsTheImageFiles(t *testing.T) {
 	}()
 
 	wantDigest, _ := img.Digest()
-	if digest != wantDigest.String() {
-		t.Errorf("digest = %s, want %s", digest, wantDigest)
+	if digest.Digest != wantDigest.String() {
+		t.Errorf("digest = %s, want %s", digest.Digest, wantDigest)
 	}
 	got := map[string]string{}
 	tr := tar.NewReader(rc)
@@ -364,11 +395,8 @@ func TestTarballPullContextCancelled(t *testing.T) {
 	}
 }
 
-// Remote pins linux/amd64 when it resolves a reference. An archive carries
-// whatever it was saved from, so the same check belongs here: without it, an
-// image built on an arm64 machine fills the cache of an x86_64 node, the
-// sentinel says the resource is complete, and nothing further down looks at
-// the architecture again.
+// An archive carries whatever it was saved from, and is checked like a pulled
+// image.
 func TestTarballPullRefusesAnotherPlatform(t *testing.T) {
 	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
 	if err != nil {
@@ -905,6 +933,154 @@ func TestEntriesEndsWhenTheConsumerCloses(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the producer is still running five seconds after the consumer closed the stream")
+	}
+}
+
+// reserialized is img with its configuration JSON in another key order, as a
+// Docker to OCI conversion leaves it. The configuration digest changes, the
+// layers do not.
+type reserialized struct {
+	v1.Image
+	raw []byte
+}
+
+func reserialize(t *testing.T, img v1.Image) *reserialized {
+	t.Helper()
+	raw, err := img.RawConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	// A map marshals with its keys sorted, the struct in declaration order.
+	sorted, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(sorted, raw) {
+		t.Fatal("the rewritten configuration is byte for byte the original")
+	}
+	return &reserialized{Image: img, raw: sorted}
+}
+
+func (r *reserialized) RawConfigFile() ([]byte, error) { return r.raw, nil }
+
+func (r *reserialized) ConfigName() (v1.Hash, error) {
+	h, _, err := v1.SHA256(bytes.NewReader(r.raw))
+	return h, err
+}
+
+func (r *reserialized) Manifest() (*v1.Manifest, error) {
+	m, err := r.Image.Manifest()
+	if err != nil {
+		return nil, err
+	}
+	m = m.DeepCopy()
+	if m.Config.Digest, err = r.ConfigName(); err != nil {
+		return nil, err
+	}
+	m.Config.Size = int64(len(r.raw))
+	return m, nil
+}
+
+func (r *reserialized) RawManifest() ([]byte, error) {
+	m, err := r.Manifest()
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(m)
+}
+
+func (r *reserialized) Digest() (v1.Hash, error) {
+	raw, err := r.RawManifest()
+	if err != nil {
+		return v1.Hash{}, err
+	}
+	h, _, err := v1.SHA256(bytes.NewReader(raw))
+	return h, err
+}
+
+// Both pullers report the same diff IDs for the same image, even when the
+// archive stores its configuration in another key order. See "Adopting a
+// seeded directory" in agent/DESIGN.md.
+func TestBothPullersAgreeOnTheLayers(t *testing.T) {
+	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := img.ConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]string, 0, len(cfg.RootFS.DiffIDs))
+	for _, d := range cfg.RootFS.DiffIDs {
+		want = append(want, d.String())
+	}
+	reg := httptest.NewServer(registry.New())
+	t.Cleanup(reg.Close)
+	ref := strings.TrimPrefix(reg.URL, "http://") + workerRefPath
+	if err := crane.Push(img, ref); err != nil {
+		t.Fatal(err)
+	}
+	converted := reserialize(t, img)
+	path := saveArchive(t, converted, "boot-cache/worker:1.0.0")
+	if a, b := mustConfigName(t, img), mustConfigName(t, converted); a == b {
+		t.Fatalf("both configurations hash to %s: the case under test is not set up", a)
+	}
+
+	for via, resolve := range map[string]func() (Image, error){
+		"registry": func() (Image, error) { return Remote{}.Resolve(t.Context(), ref) },
+		"archive":  func() (Image, error) { return Tarball{}.Resolve(t.Context(), path) },
+	} {
+		id, err := resolve()
+		if err != nil {
+			t.Fatalf("%s: %v", via, err)
+		}
+		if !slices.Equal(id.Layers, want) {
+			t.Errorf("%s: layers = %v, want %v", via, id.Layers, want)
+		}
+		if id.Digest == "" {
+			t.Errorf("%s: no manifest digest", via)
+		}
+	}
+}
+
+func mustConfigName(t *testing.T, img v1.Image) v1.Hash {
+	t.Helper()
+	h, err := img.ConfigName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// Resolve answers from the manifest alone. The registry here refuses every
+// layer blob, and resolving has to succeed anyway: an agent checking whether
+// a seeded directory holds the right image must not download the image to
+// find out.
+func TestRemoteResolveReadsNoLayer(t *testing.T) {
+	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	layer := firstLayer(t, img).digest.String()
+	var fetched atomic.Bool
+	ref := servedTampered(t, img, layer, func(b []byte) []byte {
+		fetched.Store(true)
+		return b
+	})
+
+	id, err := Remote{}.Resolve(t.Context(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetched.Load() {
+		t.Error("resolving fetched a layer")
+	}
+	if len(id.Layers) != 1 {
+		t.Errorf("layers = %v, want the image's one layer", id.Layers)
 	}
 }
 

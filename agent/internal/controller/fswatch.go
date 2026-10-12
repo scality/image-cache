@@ -151,9 +151,9 @@ func (f *FSWatcher) SetPaths(roots []string) {
 		}
 	}
 	for p := range want {
-		if f.paths[p] {
-			continue
-		}
+		// Added again even when already watched: a sync replaces a resource
+		// directory, and the watch dies with the old one. Add on a known
+		// path watches whatever is there now.
 		err := f.watcher.Add(p)
 		switch {
 		case err == nil:

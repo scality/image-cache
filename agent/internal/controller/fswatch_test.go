@@ -222,6 +222,44 @@ func TestFSWatcherEmitsOnASentinelWrite(t *testing.T) {
 	}
 }
 
+// A sync replaces a resource directory with a new one at the same path. The
+// watch on the old directory dies with it, so the next pass must watch the
+// new one, or the next tampering inside it goes unseen.
+func TestFSWatcherWatchesAResourceDirectoryReplacedAtTheSamePath(t *testing.T) {
+	fw := startedWatcher(t)
+	root := t.TempDir()
+	resource := filepath.Join(root, "worker-134-0-0")
+	place := func() {
+		tmp := filepath.Join(root, ".worker-134-0-0.tmp-1")
+		if err := os.Mkdir(tmp, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, "pause.tar"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(resource); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, resource); err != nil {
+			t.Fatal(err)
+		}
+	}
+	place()
+	fw.SetPaths([]string{root})
+	place()                     // what Extract does
+	fw.SetPaths([]string{root}) // the pass that follows
+	drain(fw)
+
+	if err := os.Remove(filepath.Join(resource, "pause.tar")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fw.Events:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event received inside a resource directory replaced at the same path")
+	}
+}
+
 // A watcher that dies while the agent keeps running would silently downgrade
 // repairs to the periodic resync, so Start has to report it.
 func TestFSWatcherStartReportsAnUnexpectedClose(t *testing.T) {

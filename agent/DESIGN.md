@@ -176,8 +176,9 @@ Triggers:
   tarballs is repaired quickly. The cache path is watched together with the
   resource directories under it: fsnotify is not recursive, and a watch on
   the cache path alone would report a whole resource directory disappearing
-  but not a single tarball deleted inside one. Watchers are adjusted after
-  each pass as resource directories come and go. Temporary directories are
+  but not a single tarball deleted inside one. Watchers are set again after
+  each pass, since resource directories come and go and a sync replaces one
+  at the same path. Temporary directories are
   not watched, and writes are ignored except to a sentinel: a pass reads the
   sentinel and checks that the files it lists exist, and an extraction by
   another process would otherwise trigger one pass per write.

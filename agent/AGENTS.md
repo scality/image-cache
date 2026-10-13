@@ -57,12 +57,13 @@ and several kustomizations.
 make fmt vet     # both run as prerequisites of test, listed here for clarity
 make test        # unit tests plus the envtest suite
 make lint        # custom golangci-lint build, logcheck included
-make test-e2e    # needs kind and an idle cluster name, see below
+make test-e2e    # needs kubectl and an idle cluster name, see below
 ```
 
 `make test-e2e` creates the cluster `image-cache-agent-test-e2e`, builds the
-image, loads it and deploys the manifests. It needs `kind` and `kubectl` on
-your `PATH`; neither is downloaded by the `Makefile`.
+image, loads it and deploys the manifests. The `Makefile` downloads `kind`
+into `bin/`, but `kubectl` has to be on your `PATH`. CI runs it on every pull
+request, in the `e2e` job of `.github/workflows/agent-ci.yaml`.
 
 A green `make lint` right after a dependency bump is not proof. Run
 `bin/golangci-lint cache clean` first, for the reason

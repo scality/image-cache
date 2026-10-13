@@ -50,3 +50,30 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the container image
         run: make -C agent docker-build
+
+  e2e:
+    runs-on: ubuntu-24.04
+    # Without a limit, a cluster that never gets ready holds the runner for
+    # the 6 hour default.
+    timeout-minutes: 30
+    env:
+      # Same minor version as the Kubernetes of the kind node image, which
+      # KIND_VERSION in agent/Makefile sets. Bump both together.
+      KUBECTL_VERSION: v1.37.1
+      KUBECTL_SHA256: 65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+      - name: Install kubectl
+        run: |
+          curl -fsSLo kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  kubectl" | sha256sum --check
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl
+          rm kubectl
+      - name: Run the e2e tests
+        run: make -C agent test-e2e

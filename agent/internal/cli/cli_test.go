@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/scality/image-cache/agent/internal/cache"
 )
@@ -713,5 +715,91 @@ func TestImportRecordsTheSameImageWhateverTheSource(t *testing.T) {
 	}
 	if !slices.Equal(layers[0], layers[1]) {
 		t.Errorf("the archive recorded %v and the registry %v for the same image", layers[0], layers[1])
+	}
+}
+
+// servedByName is served, but the reference names example.com and the
+// library default transport sends every address to the server for the rest
+// of the test. go-containerregistry already uses plain HTTP for a loopback
+// registry, so only a host name shows what --plain-http changes.
+func servedByName(t *testing.T, files map[string][]byte) string {
+	t.Helper()
+	ref := served(t, files)
+	host, path, _ := strings.Cut(ref, "/")
+	_, port, _ := net.SplitHostPort(host)
+
+	before := remote.DefaultTransport
+	t.Cleanup(func() { remote.DefaultTransport = before })
+	tr := before.(*http.Transport).Clone()
+	tr.Proxy = nil
+	dialer := &net.Dialer{}
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return dialer.DialContext(ctx, network, host)
+	}
+	remote.DefaultTransport = tr
+	return "example.com:" + port + "/" + path
+}
+
+func TestPlainHTTPReachesARegistryWithoutTLS(t *testing.T) {
+	ref := servedByName(t, map[string][]byte{pauseTarPath: []byte("pause")})
+
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", t.TempDir(), ref)
+	if code != 1 {
+		t.Fatalf("exit = %d without --plain-http, want 1 (%s)", code, errOut)
+	}
+	// Go's own message for an HTTPS request answered in plain HTTP.
+	if !strings.Contains(errOut, "HTTP response to HTTPS client") {
+		t.Errorf("stderr = %s, want an HTTPS request refused", errOut)
+	}
+
+	cacheDir := t.TempDir()
+	code, _, errOut = run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir,
+		"--plain-http", ref)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
+	}
+	if !strings.Contains(errOut, "plain HTTP") {
+		t.Errorf("stderr does not warn about plain HTTP: %s", errOut)
+	}
+	got, err := os.ReadFile(filepath.Join(cacheDir, resourceName, "pause.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "pause" {
+		t.Errorf("pause.tar = %q, want %q", got, "pause")
+	}
+}
+
+func TestPlainHTTPExcludesTheCertificateFlags(t *testing.T) {
+	ref := served(t, map[string][]byte{pauseTarPath: []byte("pause")})
+	for _, flags := range [][]string{
+		{"--ca-file", filepath.Join(t.TempDir(), "ca.crt")},
+		{"--insecure-skip-tls-verify"},
+	} {
+		t.Run(flags[0], func(t *testing.T) {
+			args := append([]string{importCmd, nameFlag, resourceName, "--cache-path", t.TempDir(),
+				"--plain-http"}, flags...)
+			code, _, errOut := run(t, append(args, ref)...)
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1 (%s)", code, errOut)
+			}
+			if !strings.Contains(errOut, flags[0]) || !strings.Contains(errOut, "--plain-http") {
+				t.Errorf("stderr does not name both flags: %s", errOut)
+			}
+		})
+	}
+}
+
+// An archive reaches no registry, so the flag says nothing about it.
+func TestPlainHTTPIsNotAnnouncedForAnArchive(t *testing.T) {
+	path := archive(t, map[string][]byte{pauseTarPath: []byte("pause")})
+
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", t.TempDir(),
+		"--plain-http", path)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
+	}
+	if strings.Contains(errOut, "plain HTTP") {
+		t.Errorf("stderr warns about plain HTTP for an archive: %s", errOut)
 	}
 }

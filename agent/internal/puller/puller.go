@@ -62,22 +62,28 @@ type Puller interface {
 type Remote struct {
 	// transport is nil for go-containerregistry's default.
 	transport http.RoundTripper
+	// plainHTTP marks every registry as insecure, see TLS.PlainHTTP.
+	plainHTTP bool
 }
 
-// TLS says how a Remote checks the registry certificate.
+// TLS says how a Remote reaches the registry and checks its certificate.
 type TLS struct {
 	// CAFile is a PEM file of CAs trusted on top of the system ones.
 	CAFile string
 	// SkipVerify accepts any certificate. It is meant for a test cluster set
 	// up by hand, never for a node.
 	SkipVerify bool
+	// PlainHTTP lets the pull use plain HTTP. It is for a registry without
+	// TLS, so it excludes the two certificate settings.
+	PlainHTTP bool
 }
 
-// NewRemote returns a Remote that checks certificates as cfg says. The CA
+// NewRemote returns a Remote that reaches the registry as cfg says. The CA
 // file is read once: a rotated CA needs a new Remote.
 func NewRemote(cfg TLS) (Remote, error) {
-	if cfg == (TLS{}) {
-		return Remote{}, nil
+	// Without a certificate setting, the library default transport does.
+	if cfg.CAFile == "" && !cfg.SkipVerify {
+		return Remote{plainHTTP: cfg.PlainHTTP}, nil
 	}
 	// The library declares its default as an *http.Transport.
 	return newRemote(cfg, remote.DefaultTransport.(*http.Transport))
@@ -86,11 +92,16 @@ func NewRemote(cfg TLS) (Remote, error) {
 // newRemote builds on base; tests hand it a transport that dials their own
 // server.
 func newRemote(cfg TLS, base *http.Transport) (Remote, error) {
-	t := base.Clone()
 	switch {
 	case cfg.CAFile != "" && cfg.SkipVerify:
 		return Remote{}, errors.Wrap(ErrTLS,
 			errors.WithDetail("a CA file is pointless when certificates are not verified"))
+	case cfg.PlainHTTP && (cfg.CAFile != "" || cfg.SkipVerify):
+		return Remote{}, errors.Wrap(ErrTLS,
+			errors.WithDetail("plain HTTP is for a registry without TLS, it takes no certificate setting"))
+	}
+	t := base.Clone()
+	switch {
 	case cfg.SkipVerify:
 		t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
 	default:
@@ -145,7 +156,13 @@ func (r Remote) Resolve(ctx context.Context, ref string) (Image, error) {
 // open resolves ref to its linux/amd64 image. It reads the manifest and the
 // configuration, never a layer: those are fetched as the stream is read.
 func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
-	parsed, err := name.ParseReference(ref)
+	var nameOpts []name.Option
+	if r.plainHTTP {
+		// The library then races HTTPS and HTTP, see "Pulling and
+		// extraction" in agent/DESIGN.md.
+		nameOpts = append(nameOpts, name.Insecure)
+	}
+	parsed, err := name.ParseReference(ref, nameOpts...)
 	if err != nil {
 		return nil, Image{}, errors.Wrap(ErrReference, errors.CausedBy(err),
 			errors.WithProperty("source", ref))

@@ -74,7 +74,7 @@ make -C rpm rpm EL=9        # build both RPMs into rpm/_build/
   per-resource failures with `utilerrors.NewAggregate`, so one bad resource
   does not stall the others.
 - **Tests**: Go's standard `testing` for the packages, Ginkgo + Gomega with
-  envtest for the reconciler, and a kind-based smoke test under `test/e2e`.
+  envtest for the reconciler, and a kind-based e2e suite under `test/e2e`.
   A behaviour that can fail on a node deserves a test that reproduces it, not
   only a unit test of the helper it calls: a partial extraction, a missing
   mount, a manual deletion.

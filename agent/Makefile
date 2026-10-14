@@ -64,29 +64,39 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # The e2e suite runs on a kind cluster. It builds the manager image and loads it
-# into kind, so no registry is involved. kubectl kuberc is disabled by default
+# into kind, so that image is never pushed. kubectl kuberc is disabled by default
 # for test isolation; enable with:
 # - KUBECTL_KUBERC=true
 KIND_CLUSTER ?= image-cache-agent-test-e2e
+# The node count of test/e2e/kind-config.yaml. A cluster left over with another
+# count would make the node assertions fail for a reason unrelated to the agent.
+KIND_NODES = 2
 
 .PHONY: setup-test-e2e
 setup-test-e2e: kind ## Set up a Kind cluster for e2e tests if it does not exist
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
+	@if $(KIND) get clusters | grep -qx '$(KIND_CLUSTER)'; then \
+		nodes=$$($(KIND) get nodes --name $(KIND_CLUSTER) | wc -l); \
+		if [ "$$nodes" -ne $(KIND_NODES) ]; then \
+			echo "Kind cluster '$(KIND_CLUSTER)' has $$nodes nodes, the e2e suite needs $(KIND_NODES)." \
+				"Delete it with 'make cleanup-test-e2e'."; \
+			exit 1; \
+		fi; \
+		echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation."; \
+	else \
+		echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
+		$(KIND) create cluster --name $(KIND_CLUSTER) --config test/e2e/kind-config.yaml; \
+	fi
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 # Tear the cluster down even when the tests fail, keeping their exit code:
 # setup-test-e2e reuses an existing cluster, so a leftover one would silently
 # run the next attempt against dirty state. The `|| status=` keeps the shell
-# alive past a failure: .SHELLFLAGS has -e.
+# alive past a failure: .SHELLFLAGS has -e. The 25m timeout replaces go
+# test's 10m default, which a failing suite can reach before Ginkgo prints
+# which spec failed, and stays under the 30m of the CI job.
 	status=0; \
-	  KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v || status=$$?; \
+	  KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -timeout 25m -v -ginkgo.v || status=$$?; \
 	  $(MAKE) cleanup-test-e2e; \
 	  exit $$status
 

@@ -30,7 +30,7 @@ internal/controller/ the node reconciler, the filesystem watcher, the labels
 internal/cache/      the on-disk store: state, extraction, garbage collection
 internal/puller/     pulling an image and streaming its layers
 config/              CRD, RBAC and DaemonSet manifests (kustomize)
-test/e2e/            kind-based smoke test, builds and deploys for real
+test/e2e/            kind-based e2e suite, builds, deploys and pulls for real
 ```
 
 ## Generated files
@@ -60,10 +60,14 @@ make lint        # custom golangci-lint build, logcheck included
 make test-e2e    # needs kubectl and an idle cluster name, see below
 ```
 
-`make test-e2e` creates the cluster `image-cache-agent-test-e2e`, builds the
-image, loads it and deploys the manifests. The `Makefile` downloads `kind`
-into `bin/`, but `kubectl` has to be on your `PATH`. CI runs it on every pull
-request, in the `e2e` job of `.github/workflows/agent-ci.yaml`.
+`make test-e2e` creates the two-node cluster `image-cache-agent-test-e2e`
+(`test/e2e/kind-config.yaml`), builds the image, loads it and deploys the
+manifests. It deploys two registries in the cluster, one plain HTTP and one
+signed by a throwaway CA, so a run pulls `registry:3.1.2` from Docker Hub
+(`registryImage` in `test/e2e/e2e_test.go`, pinned by digest). The
+`Makefile` downloads `kind` into `bin/`, but `kubectl` has to be on your
+`PATH`. CI runs it on every pull request, in the `e2e` job of
+`.github/workflows/agent-ci.yaml`.
 
 A green `make lint` right after a dependency bump is not proof. Run
 `bin/golangci-lint cache clean` first, for the reason

@@ -52,28 +52,39 @@ func Run(cmd *exec.Cmd) (string, error) {
 	return string(output), nil
 }
 
-// kindNode returns the container of the kind cluster's control plane node,
-// the only node the e2e cluster has.
-func kindNode() string {
-	cluster := defaultKindCluster
+// kindCluster returns the name of the e2e kind cluster.
+func kindCluster() string {
 	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
-		cluster = v
+		return v
 	}
-	return cluster + "-control-plane"
+	return defaultKindCluster
 }
 
-// OnKindNode runs a shell script as root on the kind node.
+// ControlPlaneNode returns the name of the kind control plane node. kind names
+// the node and its container the same way.
+func ControlPlaneNode() string {
+	return kindCluster() + "-control-plane"
+}
+
+// WorkerNode returns the name of the kind worker node, see
+// test/e2e/kind-config.yaml.
+func WorkerNode() string {
+	return kindCluster() + "-worker"
+}
+
+// OnKindNode runs a shell script as root on the kind control plane node.
 func OnKindNode(script string) (string, error) {
-	return Run(exec.Command("docker", "exec", kindNode(), "sh", "-c", script))
+	return OnNode(ControlPlaneNode(), script)
+}
+
+// OnNode runs a shell script as root on the named kind node.
+func OnNode(node, script string) (string, error) {
+	return Run(exec.Command("docker", "exec", node, "sh", "-c", script))
 }
 
 // LoadImageToKindClusterWithName loads a local docker image to the kind cluster
 func LoadImageToKindClusterWithName(name string) error {
-	cluster := defaultKindCluster
-	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
-		cluster = v
-	}
-	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
+	kindOptions := []string{"load", "docker-image", name, "--name", kindCluster()}
 	kindBinary := defaultKindBinary
 	if v, ok := os.LookupEnv("KIND"); ok {
 		kindBinary = v

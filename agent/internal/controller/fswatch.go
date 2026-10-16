@@ -8,7 +8,6 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/scality/go-errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -51,7 +50,7 @@ func NewFSWatcher(nodeName string) (*FSWatcher, error) {
 		paths:   map[string]bool{},
 		trigger: event.GenericEvent{
 			Object: &imagecachev1alpha1.ImageCache{
-				ObjectMeta: metav1.ObjectMeta{Name: nodeName},
+				Name: nodeName,
 			},
 		},
 		Events: make(chan event.GenericEvent, 1),

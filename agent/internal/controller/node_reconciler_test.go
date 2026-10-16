@@ -16,7 +16,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
@@ -130,7 +129,7 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 	It("becomes synced once the reconciler pulls and extracts it", func() {
 		By("creating a matching ImageCache")
 		ic := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: workerResourceName},
+			Name: workerResourceName,
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
 				Source:       "registry.example.com/boot-cache-worker:134.0.0",
@@ -158,7 +157,7 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 	It("does not label the node for a resource that does not select it", func() {
 		By("creating a non-matching ImageCache")
 		ic := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: "other-134-0-0"},
+			Name: "other-134-0-0",
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{zoneLabelKey: "mars"},
 				Source:       "registry.example.com/boot-cache-other:134.0.0",
@@ -176,7 +175,7 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 
 	It("removes the label and the directory once the resource is deleted", func() {
 		By("deleting the resource created in the first case")
-		ic := &imagecachev1alpha1.ImageCache{ObjectMeta: metav1.ObjectMeta{Name: workerResourceName}}
+		ic := &imagecachev1alpha1.ImageCache{Name: workerResourceName}
 		Expect(k8sClient.Delete(ctx, ic)).To(Succeed())
 
 		By("waiting for the label to disappear")
@@ -196,7 +195,7 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 
 		By("creating a matching ImageCache while the puller fails")
 		ic := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: "broken-134-0-0"},
+			Name: "broken-134-0-0",
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
 				Source:       "registry.example.com/boot-cache-broken:134.0.0",
@@ -228,7 +227,7 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 	It("keeps coexisting versions independent (upgrade scenario)", func() {
 		By("creating two coexisting versions of the same boot cache")
 		older := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: worker133ResourceName},
+			Name: worker133ResourceName,
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
 				Source:       "registry.example.com/boot-cache-worker:133.0.0",
@@ -236,7 +235,7 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 		}
 		Expect(k8sClient.Create(ctx, older)).To(Succeed())
 		newer := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: workerResourceName},
+			Name: workerResourceName,
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{osLabelKey: osLabelLinux},
 				Source:       "registry.example.com/boot-cache-worker:134.0.0",
@@ -302,7 +301,7 @@ var _ = Describe("NodeReconciler", Ordered, func() {
 
 		By("triggering a pass over the cache path with a resource that selects nothing here")
 		trigger := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: "trigger-134-0-0"},
+			Name: "trigger-134-0-0",
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{zoneLabelKey: "mars"},
 				Source:       "registry.example.com/boot-cache-other:134.0.0",
@@ -453,13 +452,11 @@ var _ = Describe("startup pass", func() {
 
 		By("creating a node carrying a stale synced label from a resource that no longer exists")
 		node := &corev1.Node{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: staleNodeName,
-				// Deliberately does not match any suite CR selector (those
-				// use kubernetes.io/os): this node must stay untouched by
-				// every other test's ImageCache resources.
-				Labels: map[string]string{zoneLabelKey: "stale", LabelPrefix + "gone-1-0-0": StatusSynced},
-			},
+			Name: staleNodeName,
+			// Deliberately does not match any suite CR selector (those
+			// use kubernetes.io/os): this node must stay untouched by
+			// every other test's ImageCache resources.
+			Labels: map[string]string{zoneLabelKey: "stale", LabelPrefix + "gone-1-0-0": StatusSynced},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		DeferCleanup(func() {
@@ -497,16 +494,16 @@ var _ = Describe("lost sentinel", func() {
 	} {
 		It("fills "+what+" again", func() {
 			ctx := context.Background()
-			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			node := &corev1.Node{
 				Name:   lostNodeName,
 				Labels: map[string]string{lostLabelKey: "yes"},
-			}}
+			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
 			DeferCleanup(func() {
 				Expect(k8sClient.Delete(context.Background(), node)).To(Succeed())
 			})
 			ic := &imagecachev1alpha1.ImageCache{
-				ObjectMeta: metav1.ObjectMeta{Name: lostResourceName},
+				Name: lostResourceName,
 				Spec: imagecachev1alpha1.ImageCacheSpec{
 					NodeSelector: map[string]string{lostLabelKey: "yes"},
 					Source:       "registry.example.com/boot-cache-lost:1.0.0",
@@ -528,7 +525,7 @@ var _ = Describe("lost sentinel", func() {
 				Puller:    &fakePuller{},
 				Resync:    time.Hour,
 			}
-			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: lostNodeName}})
+			_, err := r.Reconcile(ctx, ctrl.Request{Name: lostNodeName})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(os.ReadFile(filepath.Join(res, etcdTarName))).To(Equal([]byte("etcd")))
 			Expect(filepath.Join(res, ".image-cache-agent.json")).To(BeARegularFile())
@@ -542,7 +539,7 @@ var _ = Describe("lost sentinel", func() {
 var _ = Describe("stray cache entries", func() {
 	It("removes them", func() {
 		ctx := context.Background()
-		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: strayNodeName}}
+		node := &corev1.Node{Name: strayNodeName}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		DeferCleanup(func() {
 			Expect(k8sClient.Delete(context.Background(), node)).To(Succeed())
@@ -559,7 +556,7 @@ var _ = Describe("stray cache entries", func() {
 			Puller:    &fakePuller{},
 			Resync:    time.Hour,
 		}
-		res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: strayNodeName}})
+		res, err := r.Reconcile(ctx, ctrl.Request{Name: strayNodeName})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res.RequeueAfter).To(Equal(time.Hour))
 		Expect(stray).NotTo(BeAnExistingFile())
@@ -567,7 +564,7 @@ var _ = Describe("stray cache entries", func() {
 
 	It("fails the pass when it cannot tell whether a directory is seeded", func() {
 		ctx := context.Background()
-		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: strayNodeName}}
+		node := &corev1.Node{Name: strayNodeName}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		DeferCleanup(func() {
 			Expect(k8sClient.Delete(context.Background(), node)).To(Succeed())
@@ -585,7 +582,7 @@ var _ = Describe("stray cache entries", func() {
 			Puller:    &fakePuller{},
 			Resync:    time.Hour,
 		}
-		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: strayNodeName}})
+		_, err := r.Reconcile(ctx, ctrl.Request{Name: strayNodeName})
 		Expect(err).To(MatchError(cache.ErrGC))
 		Expect(unreadable).To(BeADirectory())
 	})
@@ -601,10 +598,8 @@ var _ = Describe("missing cache path", func() {
 
 		By("creating a node dedicated to this suite")
 		node := &corev1.Node{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:   missingNodeName,
-				Labels: map[string]string{missingPathLabelKey: missingPathLabelYes},
-			},
+			Name:   missingNodeName,
+			Labels: map[string]string{missingPathLabelKey: missingPathLabelYes},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		DeferCleanup(func() {
@@ -622,7 +617,7 @@ var _ = Describe("missing cache path", func() {
 
 		By("creating a matching ImageCache")
 		ic := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: missingResourceName},
+			Name: missingResourceName,
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{missingPathLabelKey: missingPathLabelYes},
 				Source:       "registry.example.com/boot-cache-missing:134.0.0",
@@ -673,10 +668,8 @@ var _ = Describe("filesystem repair", func() {
 
 		By("creating a node dedicated to this suite")
 		node := &corev1.Node{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:   fsNodeName,
-				Labels: map[string]string{fsRepairLabelKey: fsRepairLabelYes},
-			},
+			Name:   fsNodeName,
+			Labels: map[string]string{fsRepairLabelKey: fsRepairLabelYes},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		DeferCleanup(func() {
@@ -707,7 +700,7 @@ var _ = Describe("filesystem repair", func() {
 
 		By("creating a matching ImageCache")
 		ic := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: fsResourceName},
+			Name: fsResourceName,
 			Spec: imagecachev1alpha1.ImageCacheSpec{
 				NodeSelector: map[string]string{fsRepairLabelKey: fsRepairLabelYes},
 				Source:       "registry.example.com/boot-cache-fsrepair:1.0.0",
@@ -774,7 +767,7 @@ func placeDirectory(dir, content, sentinel string) {
 // matchingResource is a resource that selects the suite's node.
 func matchingResource(name, source string) *imagecachev1alpha1.ImageCache {
 	return &imagecachev1alpha1.ImageCache{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Spec: imagecachev1alpha1.ImageCacheSpec{
 			NodeSelector: map[string]string{osLabelKey: osLabelLinux},
 			Source:       source,

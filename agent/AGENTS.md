@@ -104,10 +104,12 @@ Do not scaffold them back in:
   because controller-runtime defaults to `true` and would gate it the day
   someone turns leader election on. Every agent converges its own node, so
   there is no leader to elect.
-- **No helm chart.** `make build-installer` renders the manifests into
-  `dist/install.yaml`, which is gitignored and attached to nothing: today the
-  way to deploy is this checkout's `make deploy`. Publishing an artifact is a
-  separate piece of work, not a missing chart.
+- **No helm chart.** The image is published on ghcr.io (see
+  [README.md](README.md#deploying)), but the manifests are not.
+  `make build-installer` renders them into `dist/install.yaml`, which is
+  gitignored and attached to nothing: the way to deploy is this checkout's
+  `make deploy`. Publishing the manifests is a separate piece of work, not a
+  missing chart.
 
 ## Traps worth knowing
 

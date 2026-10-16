@@ -28,8 +28,26 @@ All the commands below run from this directory.
 
 ## Deploying
 
-Build and push the image, then deploy. `deploy` builds `config/default`, which
-includes the CRD, so it covers what `install` does on its own.
+The image is published at `ghcr.io/scality/image-cache-agent`, for amd64 only:
+
+| Tag | Image |
+| --- | ----- |
+| `vX.Y.Z`, `vX.Y.Z-<pre>` | built from that release tag |
+| `latest` | the last release without a pre-release suffix to be built: re-running an older Promote moves it back |
+| `latest-dev` | the last pre-release, or the last merge to `main` that touches `agent/` |
+| `<last tag>-<n>-g<sha>` | a merge to `main` that touches `agent/`, named by `git describe --tags`: `<n>` commits after the last release tag |
+
+Deploy it from a checkout of the same tag. `deploy` builds `config/default`
+from this checkout, and only the image comes from `<tag>`: on another commit,
+the CRD and RBAC may not match the binary. `config/default` includes the CRD,
+so `deploy` covers what `install` does on its own.
+
+```console
+git checkout <tag>
+make deploy IMG=ghcr.io/scality/image-cache-agent:<tag>
+```
+
+To deploy your own build, build and push it first:
 
 ```console
 make docker-build docker-push IMG=<your-registry>/image-cache-agent:<tag>
@@ -134,6 +152,10 @@ pull fails on `x509: certificate signed by unknown authority`.
 On a test cluster set up by hand, `--insecure-skip-tls-verify` accepts any
 registry certificate instead. The agent logs a warning at startup. It excludes
 `--ca-file`, and no manifest here sets it: never use it on a real node.
+
+A registry that serves plain HTTP needs `--plain-http`. The agent logs a
+warning at startup. It excludes `--ca-file` and `--insecure-skip-tls-verify`,
+and no manifest here sets it.
 
 Leader election is deliberately absent. Every agent converges the node it runs
 on, so there is nothing to elect a leader for.

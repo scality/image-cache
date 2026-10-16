@@ -1,5 +1,5 @@
 # Build the manager binary
-FROM golang:1.26 AS builder
+FROM golang:1.27 AS builder
 ARG TARGETOS=linux
 # The agent only ships for amd64 (see DESIGN.md).
 ARG TARGETARCH=amd64

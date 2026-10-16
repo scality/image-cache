@@ -29,10 +29,11 @@ in [agent/README.md](agent/README.md#deploying).
 
 ## Development environment
 
-The agent needs Go 1.26+. controller-gen, kustomize, envtest, golangci-lint and
-kind are downloaded into `agent/bin/` at pinned versions by the `Makefile`, so
-those need no manual install. `kubectl` does: the deploy and e2e targets expect
-it on your `PATH`. CI pins it in `.github/workflows/agent-ci.yaml`.
+The agent needs the Go version set in `agent/go.mod`. controller-gen,
+kustomize, envtest, golangci-lint and kind are downloaded into `agent/bin/` at
+pinned versions by the `Makefile`, so those need no manual install. `kubectl`
+does: the deploy and e2e targets expect it on your `PATH`. CI pins it in
+`.github/workflows/agent-ci.yaml`.
 
 One version escapes the pinning. The `logcheck` plugin of the custom
 golangci-lint build resolves to `latest` in `agent/.custom-gcl.yml`, so a new

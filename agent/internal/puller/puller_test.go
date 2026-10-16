@@ -1132,8 +1132,7 @@ func TestRemotePullRejectsARegistrySignedByAnUnknownCA(t *testing.T) {
 	if !errors.Is(err, ErrPull) {
 		t.Fatalf("err = %v, want ErrPull", err)
 	}
-	var unknown x509.UnknownAuthorityError
-	if !errors.As(err, &unknown) {
+	if _, ok := errors.AsType[x509.UnknownAuthorityError](err); !ok {
 		t.Errorf("err = %v, want an unknown authority", err)
 	}
 }

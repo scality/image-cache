@@ -59,8 +59,8 @@ make -C rpm rpm EL=9        # build both RPMs into rpm/_build/
 
 - **Generated code is committed.** After touching the API types or the RBAC
   markers, run `make -C agent manifests generate` and commit the result. CI
-  regenerates it before running the tests but does not fail on an uncommitted
-  diff, so a stale CRD reaches `main` unnoticed if you skip this.
+  regenerates it before running the tests, and fails if the result differs
+  from what is committed. A controller-gen bump needs the same step.
 - **Logging**: `logr` through controller-runtime, with the `logcheck` linter
   enforcing balanced key-value pairs. Log a value once, at the level that owns
   it: the reconciler logs outcomes, the packages it calls return errors.

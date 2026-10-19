@@ -64,7 +64,7 @@ make test-e2e    # needs kubectl and an idle cluster name, see below
 (`test/e2e/kind-config.yaml`), builds the image, loads it and deploys the
 manifests. It deploys two registries in the cluster, one plain HTTP and one
 signed by a throwaway CA, so a run pulls `registry:3.1.2` from Docker Hub
-(`registryImage` in `test/e2e/e2e_test.go`, pinned by digest). The
+(`registryVersion` in `test/e2e/e2e_test.go`, pinned by digest). The
 `Makefile` downloads `kind` into `bin/`, but `kubectl` has to be on your
 `PATH`. CI runs it on every pull request, in the `e2e` job of
 `.github/workflows/agent-ci.yaml`.

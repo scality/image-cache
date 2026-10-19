@@ -84,11 +84,13 @@ const cachePath = "/var/lib/image-cache"
 // --plain-http the agent only tries HTTPS, as it would for a real registry.
 const registryNamespace = "image-cache-e2e-registry"
 
-// registryImage is pinned by digest, as it is pulled from Docker Hub on every
-// run.
-const registryImage = "docker.io/library/registry:3.1.2@sha256:" +
-	"ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8"
+// registryVersion pins the registry by digest, as it is pulled from Docker Hub
+// on every run. Renovate reads the tag and digest alone.
+//
+// renovate: datasource=docker depName=docker.io/library/registry
+const registryVersion = "3.1.2@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8"
 
+const registryImage = "docker.io/library/registry:" + registryVersion
 // carrierFile is the archive the test image carries, and carrierBody its
 // content. The agent extracts it under its base name.
 const (

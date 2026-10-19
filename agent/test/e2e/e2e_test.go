@@ -36,13 +36,16 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/crane"
+	gcrname "github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -76,6 +79,14 @@ const syncedName = "imagecache-e2e-synced"
 // throwaway CA, to exercise --ca-file through the shipped patch.
 const tlsName = "imagecache-e2e-tls"
 
+// adoptedName and replacedName are the ImageCaches whose directories
+// imagecachectl seeds before they exist: the first with the image the resource
+// names, the second with another one.
+const (
+	adoptedName  = "imagecache-e2e-adopted"
+	replacedName = "imagecache-e2e-replaced"
+)
+
 // cachePath is the agent's default --cache-path, mounted by the manifests.
 const cachePath = "/var/lib/image-cache"
 
@@ -91,6 +102,7 @@ const registryNamespace = "image-cache-e2e-registry"
 const registryVersion = "3.1.2@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8"
 
 const registryImage = "docker.io/library/registry:" + registryVersion
+
 // carrierFile is the archive the test image carries, and carrierBody its
 // content. The agent extracts it under its base name.
 const (
@@ -397,6 +409,61 @@ spec:
 				g.Expect(labels).NotTo(HaveKey(labelKey(tlsName)))
 			}).Should(Succeed())
 		})
+
+		It("should adopt what imagecachectl seeded with the same image, and replace another image", func() {
+			deployRegistry("registry", "")
+			digest := pushCarrier("registry", nil)
+			worker := utils.WorkerNode()
+			adoptedDir, replacedDir := cachePath+"/"+adoptedName, cachePath+"/"+replacedName
+
+			bin := buildImagecachectl()
+			adoptedInode := seedWithImagecachectl(bin, worker, adoptedName, carrierBody)
+			seedWithImagecachectl(bin, worker, replacedName, "another image")
+
+			By("restarting the agent with --plain-http")
+			patchAgent("--type=json",
+				`-p=[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--plain-http"}]`)
+
+			By("creating the two ImageCaches the seeded directories stand for")
+			applyImageCache(adoptedName, worker, "registry")
+			applyImageCache(replacedName, worker, "registry")
+
+			By("waiting for the worker to be labelled synced for both")
+			Eventually(func(g Gomega) {
+				labels, err := nodeLabels(worker)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(labels).To(HaveKeyWithValue(labelKey(adoptedName), "synced"))
+				g.Expect(labels).To(HaveKeyWithValue(labelKey(replacedName), "synced"))
+			}).Should(Succeed())
+
+			By("checking the same image was adopted in place, with no extraction")
+			// The recorder sends events in the background, so the event can
+			// land after the label.
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "events", "-A", "-o", "name",
+					"--field-selector", "reason=Adopted,involvedObject.name="+adoptedName)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).NotTo(BeEmpty(), "no Adopted event for "+adoptedName)
+			}).Should(Succeed())
+			out, err := utils.OnNode(worker, "stat -c %i "+adoptedDir+"/"+carrierFile+
+				" && grep -c '\"owner\":\"image-cache-agent\"' "+adoptedDir+"/.image-cache-agent.json")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(Equal(adoptedInode + "1\n"))
+
+			By("checking the other image was replaced by a pull")
+			expectExtracted(worker, replacedDir, digest)
+
+			By("deleting the ImageCaches, so no agent-owned state outlives the run")
+			cmd := exec.Command("kubectl", "delete", "imagecache", adoptedName, replacedName)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the ImageCaches")
+			for _, dir := range []string{adoptedDir, replacedDir} {
+				Eventually(func() (bool, error) {
+					return pathExists(worker, dir)
+				}).Should(BeFalse())
+			}
+		})
 	})
 })
 
@@ -561,8 +628,7 @@ data:
 func pushCarrier(registry string, ca []byte) v1.Hash {
 	By("pushing the carrier image to " + registry + " through a port-forward")
 	local := portForward(registryNamespace, "svc/"+registry, 5000)
-	img, err := crane.Image(map[string][]byte{"images/" + carrierFile: []byte(carrierBody)})
-	Expect(err).NotTo(HaveOccurred())
+	img := carrierImage(carrierBody)
 	opts := []crane.Option{crane.Insecure}
 	if ca != nil {
 		pool := x509.NewCertPool()
@@ -575,6 +641,50 @@ func pushCarrier(registry string, ca []byte) v1.Hash {
 	digest, err := img.Digest()
 	Expect(err).NotTo(HaveOccurred())
 	return digest
+}
+
+// carrierImage returns the test image, its archive holding body. The same body
+// gives the same layer, so the same diff IDs.
+func carrierImage(body string) v1.Image {
+	img, err := crane.Image(map[string][]byte{"images/" + carrierFile: []byte(body)})
+	Expect(err).NotTo(HaveOccurred())
+	return img
+}
+
+// buildImagecachectl builds imagecachectl and returns its path. Static, so it
+// runs whatever libc the node image has.
+func buildImagecachectl() string {
+	bin := filepath.Join(GinkgoT().TempDir(), "imagecachectl")
+	_, err := utils.Run(exec.Command("env", "CGO_ENABLED=0", "go", "build", "-o", bin, "./cmd/imagecachectl"))
+	Expect(err).NotTo(HaveOccurred(), "Failed to build imagecachectl")
+	return bin
+}
+
+// seedWithImagecachectl copies bin to node with a docker archive of the
+// carrier image holding body, and imports it there under name, as a node is
+// seeded before the agent runs. It returns the inode of the extracted archive.
+func seedWithImagecachectl(bin, node, name, body string) string {
+	By("seeding " + name + " on " + node + " with imagecachectl")
+	archive := filepath.Join(GinkgoT().TempDir(), name+".tar")
+	tag, err := gcrname.NewTag("e2e/carrier:1")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(tarball.WriteToFile(archive, tag, carrierImage(body))).To(Succeed())
+
+	// Not /tmp: it is a tmpfs on a kind node, and docker cp cannot write there.
+	dir := "/var/tmp/" + name
+	_, err = utils.OnNode(node, "mkdir -p "+dir)
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(func() { _, _ = utils.OnNode(node, "rm -rf "+dir) })
+	for _, f := range []string{bin, archive} {
+		_, err = utils.Run(exec.Command("docker", "cp", f, node+":"+dir+"/"))
+		Expect(err).NotTo(HaveOccurred())
+	}
+	_, err = utils.OnNode(node, dir+"/imagecachectl import --name "+name+" "+dir+"/"+name+".tar")
+	Expect(err).NotTo(HaveOccurred(), "imagecachectl import failed")
+
+	inode, err := utils.OnNode(node, "stat -c %i "+cachePath+"/"+name+"/"+carrierFile)
+	Expect(err).NotTo(HaveOccurred())
+	return inode
 }
 
 // newRegistryCerts returns a throwaway CA, and a certificate it signed for

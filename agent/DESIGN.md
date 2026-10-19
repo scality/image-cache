@@ -388,4 +388,6 @@ The agent never writes ImageCache resources (no status, no finalizers).
   nobody listens on leaves the node `pending`. Two registries run in the
   cluster: a pull over plain HTTP lands on the selected node only, and a
   registry signed by a private CA is refused until the shipped CA patch is
-  applied.
+  applied. `imagecachectl` seeds two directories on the worker: the agent
+  adopts the one holding the image its resource names, with no extraction,
+  and replaces the other.

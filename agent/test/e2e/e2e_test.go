@@ -160,7 +160,7 @@ var _ = Describe("Manager", Ordered, func() {
 		_, _ = utils.OnKindNode("rm -rf " + strings.Join(preexisting, " "))
 
 		By("deleting the e2e ImageCaches, in case an earlier step left them behind")
-		cmd := exec.Command("kubectl", "delete", "imagecache", imageCacheName, syncedName, tlsName, "--ignore-not-found")
+		cmd := exec.Command("kubectl", "delete", "imagecache", "--all")
 		_, _ = utils.Run(cmd)
 
 		By("removing the registry")

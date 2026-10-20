@@ -382,7 +382,12 @@ The agent never writes ImageCache resources (no status, no finalizers).
 - envtest: the full reconciler with a fake puller, from resource lifecycle to
   node labels and on-disk state: failure paths, adoption of a seeded
   directory, and entries the agent did not write.
-- A minimal kind-based e2e smoke test, with no registry infrastructure: CRD
-  installed, agent running, node labelled `pending` for a resource with an
-  unreachable source, label cleared on deletion, and garbage collection of
-  root-owned directories, which needs `DAC_OVERRIDE`.
+- A kind-based e2e suite on a control plane and a worker: CRD installed,
+  agent running on both nodes, garbage collection of root-owned directories,
+  which needs `DAC_OVERRIDE`, and node labels cleared on deletion. A source
+  nobody listens on leaves the node `pending`. Two registries run in the
+  cluster: a pull over plain HTTP lands on the selected node only, and a
+  registry signed by a private CA is refused until the shipped CA patch is
+  applied. `imagecachectl` seeds two directories on the worker: the agent
+  adopts the one holding the image its resource names, with no extraction,
+  and replaces the other.

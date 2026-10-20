@@ -29,10 +29,10 @@ in [agent/README.md](agent/README.md#deploying).
 
 ## Development environment
 
-The agent needs Go 1.26+. controller-gen, kustomize, envtest and golangci-lint
-are downloaded into `agent/bin/` at pinned versions by the `Makefile`, so those
-need no manual install. `kubectl` and `kind` do: the deploy and e2e targets
-expect them on your `PATH`.
+The agent needs Go 1.26+. controller-gen, kustomize, envtest, golangci-lint and
+kind are downloaded into `agent/bin/` at pinned versions by the `Makefile`, so
+those need no manual install. `kubectl` does: the deploy and e2e targets expect
+it on your `PATH`. CI pins it in `.github/workflows/agent-ci.yaml`.
 
 One version escapes the pinning. The `logcheck` plugin of the custom
 golangci-lint build resolves to `latest` in `agent/.custom-gcl.yml`, so a new
@@ -74,7 +74,7 @@ make -C rpm rpm EL=9        # build both RPMs into rpm/_build/
   per-resource failures with `utilerrors.NewAggregate`, so one bad resource
   does not stall the others.
 - **Tests**: Go's standard `testing` for the packages, Ginkgo + Gomega with
-  envtest for the reconciler, and a kind-based smoke test under `test/e2e`.
+  envtest for the reconciler, and a kind-based e2e suite under `test/e2e`.
   A behaviour that can fail on a node deserves a test that reproduces it, not
   only a unit test of the helper it calls: a partial extraction, a missing
   mount, a manual deletion.

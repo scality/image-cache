@@ -20,12 +20,32 @@ limitations under the License.
 package e2e
 
 import (
+	"bufio"
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"net"
+	"net/http"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/google/go-containerregistry/pkg/crane"
+	gcrname "github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -45,7 +65,50 @@ const imageCacheName = "imagecache-e2e-smoke"
 
 // nodeLabelKey is the sync-status label the agent sets on a selected node for
 // imageCacheName. See api/v1alpha1.ImageCache's doc comment for the contract.
-const nodeLabelKey = "image-cache.scality.com/" + imageCacheName
+var nodeLabelKey = labelKey(imageCacheName)
+
+// agentSelector selects the agent pods, one per node.
+const agentSelector = "control-plane=controller-manager"
+
+// syncedName is the ImageCache that pulls a real image from the in-cluster
+// registry, so that the whole sync path runs: pull, extraction, sentinel,
+// synced label, then garbage collection once it is deleted.
+const syncedName = "imagecache-e2e-synced"
+
+// tlsName is the ImageCache that pulls from the registry signed by a
+// throwaway CA, to exercise --ca-file through the shipped patch.
+const tlsName = "imagecache-e2e-tls"
+
+// adoptedName and replacedName are the ImageCaches whose directories
+// imagecachectl seeds before they exist: the first with the image the resource
+// names, the second with another one.
+const (
+	adoptedName  = "imagecache-e2e-adopted"
+	replacedName = "imagecache-e2e-replaced"
+)
+
+// cachePath is the agent's default --cache-path, mounted by the manifests.
+const cachePath = "/var/lib/image-cache"
+
+// registryNamespace holds the two registries the agent pulls from, one plain
+// HTTP and one TLS. Sources name them by their Service, a host name: without
+// --plain-http the agent only tries HTTPS, as it would for a real registry.
+const registryNamespace = "image-cache-e2e-registry"
+
+// registryVersion pins the registry by digest, as it is pulled from Docker Hub
+// on every run. Renovate reads the tag and digest alone.
+//
+// renovate: datasource=docker depName=docker.io/library/registry
+const registryVersion = "3.1.2@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8"
+
+const registryImage = "docker.io/library/registry:" + registryVersion
+
+// carrierFile is the archive the test image carries, and carrierBody its
+// content. The agent extracts it under its base name.
+const (
+	carrierFile = "e2e.tar"
+	carrierBody = "e2e"
+)
 
 // preexisting is what a node holds before the agent runs, written as root in
 // mode 0700: a directory imagecachectl seeded, which stays, then what goes:
@@ -69,8 +132,6 @@ var seedScript = "set -e\n" +
 	"echo '{not json' > " + preexisting[2] + "/.image-cache-agent.json\n"
 
 var _ = Describe("Manager", Ordered, func() {
-	var controllerPodName string
-
 	// Before running the tests, set up the environment by creating the namespace,
 	// enforce the restricted security policy to the namespace, installing CRDs,
 	// and deploying the controller.
@@ -110,8 +171,12 @@ var _ = Describe("Manager", Ordered, func() {
 		By("removing the preexisting directories")
 		_, _ = utils.OnKindNode("rm -rf " + strings.Join(preexisting, " "))
 
-		By("deleting the smoke-test ImageCache, in case an earlier step left it behind")
-		cmd := exec.Command("kubectl", "delete", "imagecache", imageCacheName, "--ignore-not-found")
+		By("deleting the e2e ImageCaches, in case an earlier step left them behind")
+		cmd := exec.Command("kubectl", "delete", "imagecache", "--all")
+		_, _ = utils.Run(cmd)
+
+		By("removing the registry")
+		cmd = exec.Command("kubectl", "delete", "ns", registryNamespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
 		By("undeploying the controller-manager")
@@ -132,8 +197,8 @@ var _ = Describe("Manager", Ordered, func() {
 	AfterEach(func() {
 		specReport := CurrentSpecReport()
 		if specReport.Failed() {
-			By("Fetching controller manager pod logs")
-			cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
+			By("Fetching the logs of every agent pod")
+			cmd := exec.Command("kubectl", "logs", "-l", agentSelector, "-n", namespace, "--prefix", "--tail=-1")
 			controllerLogs, err := utils.Run(cmd)
 			if err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs:\n %s", controllerLogs)
@@ -142,7 +207,7 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 
 			By("Fetching Kubernetes events")
-			cmd = exec.Command("kubectl", "get", "events", "-n", namespace, "--sort-by=.lastTimestamp")
+			cmd = exec.Command("kubectl", "get", "events", "-A", "--sort-by=.lastTimestamp")
 			eventsOutput, err := utils.Run(cmd)
 			if err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Kubernetes events:\n%s", eventsOutput)
@@ -151,7 +216,7 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 
 			By("Fetching controller manager pod description")
-			cmd = exec.Command("kubectl", "describe", "pod", controllerPodName, "-n", namespace)
+			cmd = exec.Command("kubectl", "describe", "pods", "-l", agentSelector, "-n", namespace)
 			podDescription, err := utils.Run(cmd)
 			if err == nil {
 				fmt.Println("Pod description:\n", podDescription)
@@ -182,30 +247,21 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyDaemonSetReady).Should(Succeed())
 
-			By("getting the name of the controller-manager pod")
-			cmd := exec.Command("kubectl", "get",
-				"pods", "-l", "control-plane=controller-manager",
-				"-o", "go-template={{ range .items }}"+
-					"{{ if not .metadata.deletionTimestamp }}"+
-					"{{ .metadata.name }}"+
-					"{{ \"\\n\" }}{{ end }}{{ end }}",
-				"-n", namespace,
-			)
-			podOutput, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to retrieve controller-manager pod information")
-			podNames := utils.GetNonEmptyLines(podOutput)
-			Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
-			controllerPodName = podNames[0]
-			Expect(controllerPodName).To(ContainSubstring("controller-manager"))
+			By("checking that one agent runs on each of the two nodes")
+			cmd := exec.Command("kubectl", "get", "pods", "-l", agentSelector, "-n", namespace,
+				"-o", "jsonpath={range .items[*]}{.spec.nodeName}{\"\\n\"}{end}")
+			out, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to list the agent pods")
+			Expect(utils.GetNonEmptyLines(out)).To(ConsistOf(utils.ControlPlaneNode(), utils.WorkerNode()))
 		})
 
 		It("should collect what no resource keeps, and keep what imagecachectl seeded", func() {
 			// They are root's, in mode 0700, and some hold a file: removing
 			// them takes DAC_OVERRIDE.
 			for _, gone := range preexisting[1:] {
-				Eventually(func() (string, error) {
-					return utils.OnKindNode("test -e " + gone + " && echo present || echo gone")
-				}).Should(Equal("gone\n"), gone)
+				Eventually(func() (bool, error) {
+					return pathExists(utils.ControlPlaneNode(), gone)
+				}).Should(BeFalse(), gone)
 			}
 
 			out, err := utils.OnKindNode("stat -c '%u %n' " + preexisting[0] +
@@ -219,13 +275,11 @@ var _ = Describe("Manager", Ordered, func() {
 		// exercised without any registry infrastructure by pointing source at
 		// an address nothing listens on.
 		It("should label the node pending for an ImageCache with an unreachable source, then clear it on deletion", func() {
-			By("getting the name of the (single) kind node")
-			cmd := exec.Command("kubectl", "get", "nodes", "-o", "jsonpath={.items[0].metadata.name}")
-			nodeName, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(nodeName).NotTo(BeEmpty())
+			// The ImageCache selects both nodes; one is enough to check the
+			// contract, node selection has a spec of its own.
+			nodeName := utils.ControlPlaneNode()
 
-			By("creating an ImageCache selecting this node with an unreachable source")
+			By("creating an ImageCache selecting every node with an unreachable source")
 			imageCacheYAML := fmt.Sprintf(`apiVersion: image-cache.scality.com/v1alpha1
 kind: ImageCache
 metadata:
@@ -235,9 +289,9 @@ spec:
     kubernetes.io/os: linux
   source: 127.0.0.1:1/nope:1
 `, imageCacheName)
-			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(imageCacheYAML)
-			_, err = utils.Run(cmd)
+			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create the ImageCache")
 
 			By("waiting for the node to be labelled pending")
@@ -261,8 +315,472 @@ spec:
 			}
 			Eventually(verifyLabelGone, 2*time.Minute).Should(Succeed())
 		})
+
+		It("should pull over plain HTTP onto the selected node only, then collect it on deletion", func() {
+			deployRegistry("registry", "")
+			digest := pushCarrier("registry", nil)
+
+			By("restarting the agent with --plain-http")
+			patchAgent("--type=json",
+				`-p=[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--plain-http"}]`)
+
+			By("creating an ImageCache that selects the worker only")
+			worker, controlPlane := utils.WorkerNode(), utils.ControlPlaneNode()
+			applyImageCache(syncedName, worker, "registry")
+			syncedKey := labelKey(syncedName)
+			dir := cachePath + "/" + syncedName
+
+			By("waiting for the worker to be labelled synced")
+			Eventually(func(g Gomega) {
+				labels, err := nodeLabels(worker)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(labels).To(HaveKeyWithValue(syncedKey, "synced"))
+			}).Should(Succeed())
+			expectExtracted(worker, dir, digest)
+
+			By("checking that the control plane, not selected, got neither label nor directory")
+			labels, err := nodeLabels(controlPlane)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(labels).NotTo(HaveKey(syncedKey))
+			Expect(pathExists(controlPlane, dir)).To(BeFalse())
+
+			By("deleting the ImageCache")
+			cmd := exec.Command("kubectl", "delete", "imagecache", syncedName)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the ImageCache")
+
+			By("waiting for the directory and the label to go")
+			Eventually(func() (bool, error) {
+				return pathExists(worker, dir)
+			}).Should(BeFalse())
+			Eventually(func(g Gomega) {
+				labels, err := nodeLabels(worker)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(labels).NotTo(HaveKey(syncedKey))
+			}).Should(Succeed())
+		})
+
+		It("should refuse a registry signed by an unknown CA, then pull once the registry CA patch is applied", func() {
+			ca, cert, key := newRegistryCerts("registry-tls." + registryNamespace + ".svc.cluster.local")
+			deployRegistry("registry-tls", tlsSecret("registry-tls", cert, key))
+			digest := pushCarrier("registry-tls", ca)
+
+			By("creating an ImageCache for the TLS registry, the agent trusting the system CAs only")
+			controlPlane := utils.ControlPlaneNode()
+			applyImageCache(tlsName, controlPlane, "registry-tls")
+
+			By("waiting for the agent to report the unknown authority")
+			Eventually(func() (string, error) {
+				cmd := exec.Command("kubectl", "logs", "-l", agentSelector, "-n", namespace, "--tail=-1")
+				return utils.Run(cmd)
+			}).Should(ContainSubstring("certificate signed by unknown authority"))
+			labels, err := nodeLabels(controlPlane)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(labels).To(HaveKeyWithValue(labelKey(tlsName), "pending"))
+
+			By("creating the registry-ca ConfigMap and applying the shipped CA patch")
+			cmd := exec.Command("kubectl", "create", "configmap", "registry-ca", "-n", namespace,
+				"--from-literal=ca.crt="+string(ca))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the registry-ca ConfigMap")
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "configmap", "registry-ca", "-n", namespace))
+			})
+			patchAgent("--type=json", "--patch-file=config/default/manager_registry_ca_patch.yaml")
+
+			By("waiting for the control plane to be labelled synced")
+			Eventually(func(g Gomega) {
+				labels, err := nodeLabels(controlPlane)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(labels).To(HaveKeyWithValue(labelKey(tlsName), "synced"))
+			}).Should(Succeed())
+			expectExtracted(controlPlane, cachePath+"/"+tlsName, digest)
+
+			By("deleting the ImageCache, so no agent-owned state outlives the run")
+			cmd = exec.Command("kubectl", "delete", "imagecache", tlsName)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the ImageCache")
+			Eventually(func() (bool, error) {
+				return pathExists(controlPlane, cachePath+"/"+tlsName)
+			}).Should(BeFalse())
+			Eventually(func(g Gomega) {
+				labels, err := nodeLabels(controlPlane)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(labels).NotTo(HaveKey(labelKey(tlsName)))
+			}).Should(Succeed())
+		})
+
+		It("should adopt what imagecachectl seeded with the same image, and replace another image", func() {
+			deployRegistry("registry", "")
+			digest := pushCarrier("registry", nil)
+			worker := utils.WorkerNode()
+			adoptedDir, replacedDir := cachePath+"/"+adoptedName, cachePath+"/"+replacedName
+
+			bin := buildImagecachectl()
+			adoptedInode := seedWithImagecachectl(bin, worker, adoptedName, carrierBody)
+			seedWithImagecachectl(bin, worker, replacedName, "another image")
+
+			By("restarting the agent with --plain-http")
+			patchAgent("--type=json",
+				`-p=[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--plain-http"}]`)
+
+			By("creating the two ImageCaches the seeded directories stand for")
+			applyImageCache(adoptedName, worker, "registry")
+			applyImageCache(replacedName, worker, "registry")
+
+			By("waiting for the worker to be labelled synced for both")
+			Eventually(func(g Gomega) {
+				labels, err := nodeLabels(worker)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(labels).To(HaveKeyWithValue(labelKey(adoptedName), "synced"))
+				g.Expect(labels).To(HaveKeyWithValue(labelKey(replacedName), "synced"))
+			}).Should(Succeed())
+
+			By("checking the same image was adopted in place, with no extraction")
+			// The recorder sends events in the background, so the event can
+			// land after the label.
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "events", "-A", "-o", "name",
+					"--field-selector", "reason=Adopted,involvedObject.name="+adoptedName)
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).NotTo(BeEmpty(), "no Adopted event for "+adoptedName)
+			}).Should(Succeed())
+			out, err := utils.OnNode(worker, "stat -c %i "+adoptedDir+"/"+carrierFile+
+				" && grep -c '\"owner\":\"image-cache-agent\"' "+adoptedDir+"/.image-cache-agent.json")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(Equal(adoptedInode + "1\n"))
+
+			By("checking the other image was replaced by a pull")
+			expectExtracted(worker, replacedDir, digest)
+
+			By("deleting the ImageCaches, so no agent-owned state outlives the run")
+			cmd := exec.Command("kubectl", "delete", "imagecache", adoptedName, replacedName)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the ImageCaches")
+			for _, dir := range []string{adoptedDir, replacedDir} {
+				Eventually(func() (bool, error) {
+					return pathExists(worker, dir)
+				}).Should(BeFalse())
+			}
+		})
 	})
 })
+
+// patchAgent patches the agent DaemonSet, waits for the new pods, and rolls
+// the change back when the spec ends: --plain-http and --ca-file exclude each
+// other, so each spec starts from the shipped manifests.
+func patchAgent(args ...string) {
+	cmd := exec.Command("kubectl", append([]string{"patch", "daemonset", daemonSetName, "-n", namespace}, args...)...)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to patch the agent")
+	// Registered before the wait, so a rollout that times out is undone too.
+	DeferCleanup(func() {
+		// After the last spec, AfterAll has already removed the namespace
+		// when this runs, and there is nothing left to roll back.
+		if _, err := utils.Run(exec.Command("kubectl", "get", "ns", namespace)); err != nil {
+			return
+		}
+		cmd := exec.Command("kubectl", "rollout", "undo", "daemonset/"+daemonSetName, "-n", namespace)
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to roll the agent back")
+		waitAgentRollout()
+	})
+	waitAgentRollout()
+}
+
+func waitAgentRollout() {
+	cmd := exec.Command("kubectl", "rollout", "status", "daemonset/"+daemonSetName, "-n", namespace, "--timeout=2m")
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "The agent did not roll out")
+}
+
+// applyImageCache creates an ImageCache that selects one node and pulls the
+// carrier image from the named in-cluster registry.
+func applyImageCache(name, node, registry string) {
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(fmt.Sprintf(`apiVersion: image-cache.scality.com/v1alpha1
+kind: ImageCache
+metadata:
+  name: %s
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: %s
+  source: %s.%s.svc.cluster.local:5000/e2e/carrier:1
+`, name, node, registry, registryNamespace))
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to create the ImageCache")
+}
+
+// expectExtracted checks the archive and the sentinel the agent wrote on node.
+func expectExtracted(node, dir string, digest v1.Hash) {
+	By("checking the extracted archive and its sentinel on " + node)
+	out, err := utils.OnNode(node, "cat "+dir+"/"+carrierFile)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(out).To(Equal(carrierBody))
+	out, err = utils.OnNode(node, "cat "+dir+"/.image-cache-agent.json")
+	Expect(err).NotTo(HaveOccurred())
+	var sentinel struct {
+		Digest string   `json:"digest"`
+		Owner  string   `json:"owner"`
+		Files  []string `json:"files"`
+	}
+	Expect(json.Unmarshal([]byte(out), &sentinel)).To(Succeed())
+	Expect(sentinel.Owner).To(Equal("image-cache-agent"))
+	Expect(sentinel.Digest).To(Equal(digest.String()))
+	Expect(sentinel.Files).To(ConsistOf(carrierFile))
+}
+
+// deployRegistry deploys a single-replica registry and its Service, both
+// called name, and waits for it. Given a TLS Secret manifest from tlsSecret,
+// it applies it and the registry serves HTTPS with that certificate.
+func deployRegistry(name, secret string) {
+	By("deploying the " + name + " registry in the cluster")
+	tlsEnv, tlsMount, tlsVolume, scheme := "", "", "", "HTTP"
+	if secret != "" {
+		tlsEnv = `
+          env:
+            - name: REGISTRY_HTTP_TLS_CERTIFICATE
+              value: /certs/tls.crt
+            - name: REGISTRY_HTTP_TLS_KEY
+              value: /certs/tls.key`
+		tlsMount = `
+          volumeMounts:
+            - name: certs
+              mountPath: /certs`
+		tlsVolume = `
+      volumes:
+        - name: certs
+          secret:
+            secretName: ` + name
+		scheme = "HTTPS"
+	}
+	manifest := fmt.Sprintf(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: %[1]s
+---%[3]s
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: %[2]s
+  namespace: %[1]s
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: %[2]s
+  template:
+    metadata:
+      labels:
+        app: %[2]s
+    spec:
+      containers:
+        - name: registry
+          image: %[4]s
+          ports:
+            - containerPort: 5000%[5]s%[6]s
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+              scheme: %[7]s%[8]s
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: %[2]s
+  namespace: %[1]s
+spec:
+  selector:
+    app: %[2]s
+  ports:
+    - port: 5000
+`, registryNamespace, name, secret, registryImage, tlsEnv, tlsMount, scheme, tlsVolume)
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to deploy the registry")
+	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+name, "-n", registryNamespace, "--timeout=2m")
+	_, err = utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "The registry did not become ready")
+}
+
+// tlsSecret returns the manifest of the Secret deployRegistry mounts for the
+// registry called name, followed by the document separator it expects.
+func tlsSecret(name string, cert, key []byte) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+  namespace: %s
+type: kubernetes.io/tls
+data:
+  tls.crt: %s
+  tls.key: %s
+---`, name, registryNamespace, base64.StdEncoding.EncodeToString(cert), base64.StdEncoding.EncodeToString(key))
+}
+
+// pushCarrier pushes the carrier image to the named registry through a
+// port-forward and returns its digest. With ca, the push trusts that CA,
+// which also signed the certificate for localhost.
+func pushCarrier(registry string, ca []byte) v1.Hash {
+	By("pushing the carrier image to " + registry + " through a port-forward")
+	local := portForward(registryNamespace, "svc/"+registry, 5000)
+	img := carrierImage(carrierBody)
+	opts := []crane.Option{crane.Insecure}
+	if ca != nil {
+		pool := x509.NewCertPool()
+		Expect(pool.AppendCertsFromPEM(ca)).To(BeTrue())
+		tr := remote.DefaultTransport.(*http.Transport).Clone()
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		opts = []crane.Option{crane.WithTransport(tr)}
+	}
+	Expect(crane.Push(img, local+"/e2e/carrier:1", opts...)).To(Succeed())
+	digest, err := img.Digest()
+	Expect(err).NotTo(HaveOccurred())
+	return digest
+}
+
+// carrierImage returns the test image, its archive holding body. The same body
+// gives the same layer, so the same diff IDs.
+func carrierImage(body string) v1.Image {
+	img, err := crane.Image(map[string][]byte{"images/" + carrierFile: []byte(body)})
+	Expect(err).NotTo(HaveOccurred())
+	return img
+}
+
+// buildImagecachectl builds imagecachectl and returns its path. Static, so it
+// runs whatever libc the node image has.
+func buildImagecachectl() string {
+	bin := filepath.Join(GinkgoT().TempDir(), "imagecachectl")
+	_, err := utils.Run(exec.Command("env", "CGO_ENABLED=0", "go", "build", "-o", bin, "./cmd/imagecachectl"))
+	Expect(err).NotTo(HaveOccurred(), "Failed to build imagecachectl")
+	return bin
+}
+
+// seedWithImagecachectl copies bin to node with a docker archive of the
+// carrier image holding body, and imports it there under name, as a node is
+// seeded before the agent runs. It returns the inode of the extracted archive.
+func seedWithImagecachectl(bin, node, name, body string) string {
+	By("seeding " + name + " on " + node + " with imagecachectl")
+	archive := filepath.Join(GinkgoT().TempDir(), name+".tar")
+	tag, err := gcrname.NewTag("e2e/carrier:1")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(tarball.WriteToFile(archive, tag, carrierImage(body))).To(Succeed())
+
+	// Not /tmp: it is a tmpfs on a kind node, and docker cp cannot write there.
+	dir := "/var/tmp/" + name
+	_, err = utils.OnNode(node, "mkdir -p "+dir)
+	Expect(err).NotTo(HaveOccurred())
+	DeferCleanup(func() { _, _ = utils.OnNode(node, "rm -rf "+dir) })
+	for _, f := range []string{bin, archive} {
+		_, err = utils.Run(exec.Command("docker", "cp", f, node+":"+dir+"/"))
+		Expect(err).NotTo(HaveOccurred())
+	}
+	_, err = utils.OnNode(node, dir+"/imagecachectl import --name "+name+" "+dir+"/"+name+".tar")
+	Expect(err).NotTo(HaveOccurred(), "imagecachectl import failed")
+
+	inode, err := utils.OnNode(node, "stat -c %i "+cachePath+"/"+name+"/"+carrierFile)
+	Expect(err).NotTo(HaveOccurred())
+	return inode
+}
+
+// newRegistryCerts returns a throwaway CA, and a certificate it signed for
+// host and for localhost, the port-forward the test pushes through. All PEM.
+func newRegistryCerts(host string) (ca, cert, key []byte) {
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "image-cache e2e CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	Expect(err).NotTo(HaveOccurred())
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	Expect(err).NotTo(HaveOccurred())
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: host},
+		DNSNames:     []string{host, "localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caTmpl, &leafKey.PublicKey, caKey)
+	Expect(err).NotTo(HaveOccurred())
+	keyDER, err := x509.MarshalECPrivateKey(leafKey)
+	Expect(err).NotTo(HaveOccurred())
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+}
+
+// forwardingFrom matches the line kubectl prints once a port-forward listens.
+var forwardingFrom = regexp.MustCompile(`Forwarding from 127\.0\.0\.1:(\d+)`)
+
+// portForward forwards a random local port to the target's port and returns
+// "localhost:<port>". The forward stops when the spec ends.
+func portForward(ns, target string, port int) string {
+	cmd := exec.Command("kubectl", "port-forward", "-n", ns, target, fmt.Sprintf(":%d", port))
+	stdout, err := cmd.StdoutPipe()
+	Expect(err).NotTo(HaveOccurred())
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	Expect(cmd.Start()).To(Succeed())
+
+	// One goroutine reads stdout to the end: it reports the port, then keeps
+	// draining so kubectl never blocks on a full pipe. Wait must only run
+	// once it is done, as os/exec requires.
+	found := make(chan string, 1)
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		lines := bufio.NewScanner(stdout)
+		for lines.Scan() {
+			if m := forwardingFrom.FindStringSubmatch(lines.Text()); m != nil {
+				found <- m[1]
+			}
+		}
+	}()
+	DeferCleanup(func() {
+		_ = cmd.Process.Kill()
+		<-drained
+		_ = cmd.Wait()
+	})
+
+	select {
+	case p := <-found:
+		return "localhost:" + p
+	case <-drained:
+		Fail("kubectl port-forward exited before listening: " + stderr.String())
+	case <-time.After(30 * time.Second):
+		Fail("kubectl port-forward did not listen within 30s: " + stderr.String())
+	}
+	return ""
+}
+
+// pathExists reports whether path exists on the named kind node.
+func pathExists(node, path string) (bool, error) {
+	out, err := utils.OnNode(node, "test -e "+path+" && echo present || echo gone")
+	return out == "present\n", err
+}
+
+// labelKey returns the sync-status label the agent sets for an ImageCache.
+// See api/v1alpha1.ImageCache's doc comment for the contract.
+func labelKey(name string) string {
+	return "image-cache.scality.com/" + name
+}
 
 // nodeLabels returns the labels currently set on the named node.
 func nodeLabels(name string) (map[string]string, error) {

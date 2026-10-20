@@ -50,3 +50,31 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the container image
         run: make -C agent docker-build
+
+  e2e:
+    runs-on: ubuntu-24.04
+    # Without a limit, a cluster that never gets ready holds the runner for
+    # the 6 hour default.
+    timeout-minutes: 30
+    env:
+      # Taken from the official image, so Renovate can bump the tag and the
+      # digest together. kubectl supports a cluster one minor version away,
+      # so it may move before KIND_VERSION in agent/Makefile.
+      # renovate: datasource=docker depName=registry.k8s.io/kubectl
+      KUBECTL_VERSION: v1.37.1@sha256:b7cab618e281b1ee7484e7b706a96e2135fbb6e072c2a573a7dab4e87d7f2385
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+      - name: Install kubectl
+        run: |
+          id=$(docker create --platform linux/amd64 "registry.k8s.io/kubectl:${KUBECTL_VERSION}")
+          sudo docker cp "$id":/bin/kubectl /usr/local/bin/kubectl
+          docker rm "$id"
+          kubectl version --client
+      - name: Run the e2e tests
+        run: make -C agent test-e2e

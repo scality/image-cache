@@ -44,8 +44,8 @@ Never hand-edit these; regenerate them instead:
   scaffolding
 
 They come from the markers in the Go sources, so change the marker, run
-`make manifests generate`, and commit the result. Nothing in CI catches a stale
-one; [../CONTRIBUTING.md](../CONTRIBUTING.md#agent-go) says why.
+`make manifests generate`, and commit the result. CI fails on a stale one, see
+[../CONTRIBUTING.md](../CONTRIBUTING.md#agent-go).
 
 Leave the `+kubebuilder:scaffold:*` comments alone. They are insertion points
 for the kubebuilder CLI, in `cmd/manager/main.go`, `internal/controller/suite_test.go`

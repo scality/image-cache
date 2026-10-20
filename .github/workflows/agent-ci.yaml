@@ -42,6 +42,20 @@ jobs:
           cache-dependency-path: agent/go.sum
       - name: Run tests
         run: make -C agent test
+      # `make test` first regenerates the CRDs, RBAC and deepcopy code, then
+      # runs `go fmt`. Whatever they change must be committed: an edited API
+      # type or RBAC marker, a controller-gen bump, or unformatted code.
+      - name: Check make test left the tree clean
+        if: ${{ !cancelled() }}
+        run: |
+          git diff
+          test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
+      # Nothing else runs kustomize, so a kustomize bump would go untested.
+      - name: Build the manifests with kustomize
+        if: ${{ !cancelled() }}
+        run: |
+          make -C agent kustomize
+          agent/bin/kustomize build agent/config/default > /dev/null
 
   image:
     runs-on: ubuntu-latest

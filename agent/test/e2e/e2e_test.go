@@ -25,10 +25,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -49,6 +51,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/scality/image-cache/agent/internal/cache"
 	"github.com/scality/image-cache/agent/test/utils"
 )
 
@@ -338,6 +341,14 @@ spec:
 			}).Should(Succeed())
 			expectExtracted(worker, dir, digest)
 
+			// Same name, same size: only the digest tells the two apart.
+			By("rewriting the archive on the worker with other content of the same size")
+			_, err := utils.OnNode(worker, "printf %s "+strings.ToUpper(carrierBody)+" > "+dir+"/"+carrierFile)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() (string, error) {
+				return utils.OnNode(worker, "cat "+dir+"/"+carrierFile)
+			}).Should(Equal(carrierBody), "the agent did not extract the rewritten archive again")
+
 			By("checking that the control plane, not selected, got neither label nor directory")
 			labels, err := nodeLabels(controlPlane)
 			Expect(err).NotTo(HaveOccurred())
@@ -521,14 +532,19 @@ func expectExtracted(node, dir string, digest v1.Hash) {
 	out, err = utils.OnNode(node, "cat "+dir+"/.image-cache-agent.json")
 	Expect(err).NotTo(HaveOccurred())
 	var sentinel struct {
-		Digest string   `json:"digest"`
-		Owner  string   `json:"owner"`
-		Files  []string `json:"files"`
+		Digest  string       `json:"digest"`
+		Owner   string       `json:"owner"`
+		Files   []string     `json:"files"`
+		Content []cache.File `json:"content"`
 	}
 	Expect(json.Unmarshal([]byte(out), &sentinel)).To(Succeed())
 	Expect(sentinel.Owner).To(Equal("image-cache-agent"))
 	Expect(sentinel.Digest).To(Equal(digest.String()))
 	Expect(sentinel.Files).To(ConsistOf(carrierFile))
+	sum := sha256.Sum256([]byte(carrierBody))
+	Expect(sentinel.Content).To(ConsistOf(cache.File{
+		Name: carrierFile, Digest: "sha256:" + hex.EncodeToString(sum[:]), Size: int64(len(carrierBody)),
+	}))
 }
 
 // deployRegistry deploys a single-replica registry and its Service, both

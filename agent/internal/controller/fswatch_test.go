@@ -146,9 +146,9 @@ func TestFSWatcherIgnoresTemporaryDirectories(t *testing.T) {
 	}
 }
 
-// A write to a tarball does not change what a pass checks, so it triggers
-// none. Removing the file does.
-func TestFSWatcherIgnoresWrites(t *testing.T) {
+// A pass checks the content of the cached files, so a write to one triggers
+// a pass, even with no file created or removed.
+func TestFSWatcherEmitsOnAWriteToACachedFile(t *testing.T) {
 	fw := startedWatcher(t)
 	root := t.TempDir()
 	resource := filepath.Join(root, "worker-134-0-0")
@@ -162,7 +162,36 @@ func TestFSWatcherIgnoresWrites(t *testing.T) {
 	fw.SetPaths([]string{root})
 	drain(fw)
 
-	f, err := os.OpenFile(tarball, os.O_WRONLY|os.O_APPEND, 0)
+	f, err := os.OpenFile(tarball, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("y")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fw.Events:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event received after a cached file was written")
+	}
+}
+
+// A write to a flat file at the cache root changes nothing a pass checks, and
+// a copy writes thousands of times, so it triggers none. Removing it does.
+func TestFSWatcherIgnoresWritesToFlatFiles(t *testing.T) {
+	fw := startedWatcher(t)
+	root := t.TempDir()
+	flat := filepath.Join(root, "some-bootstrap-image.tar")
+	if err := os.WriteFile(flat, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fw.SetPaths([]string{root})
+	drain(fw)
+
+	f, err := os.OpenFile(flat, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,17 +205,17 @@ func TestFSWatcherIgnoresWrites(t *testing.T) {
 	}
 	select {
 	case <-fw.Events:
-		t.Fatal("received an event for a write")
+		t.Fatal("received an event for a write to a flat file")
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	if err := os.Remove(tarball); err != nil {
+	if err := os.Remove(flat); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case <-fw.Events:
 	case <-time.After(5 * time.Second):
-		t.Fatal("no event received after the tarball was removed")
+		t.Fatal("no event received after the flat file was removed")
 	}
 }
 

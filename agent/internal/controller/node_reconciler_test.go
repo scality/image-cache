@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -692,7 +693,7 @@ var _ = Describe("filesystem repair", func() {
 		startOwnReconciler(&NodeReconciler{
 			NodeName:  fsNodeName,
 			CachePath: fsCacheDir,
-			Store:     cache.Store{},
+			Store:     cache.NewStore(logr.Discard()),
 			Puller:    &fakePuller{},
 			FS:        fw,
 			Resync:    0,
@@ -735,6 +736,29 @@ var _ = Describe("filesystem repair", func() {
 		Eventually(func() ([]byte, error) {
 			return os.ReadFile(tarPath)
 		}, 10*time.Second).Should(Equal([]byte("etcd")))
+
+		// Same name, same size: only the digest tells it apart, and only a
+		// write event reports it.
+		By("rewriting the tarball in place with other content of the same size")
+		f, err := os.OpenFile(tarPath, os.O_WRONLY, 0)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = f.Write([]byte("ETCD"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(f.Close()).To(Succeed())
+		// The write may land in the timestamp tick of the extraction, which
+		// would keep the key the agent remembers: move mtime to be sure. The
+		// write's own event may already have replaced the file, and then
+		// there is nothing left to move.
+		past := time.Now().Add(-time.Hour)
+		if err := os.Chtimes(tarPath, past, past); err != nil {
+			Expect(err).To(MatchError(os.ErrNotExist))
+		}
+
+		By("waiting for the fsnotify-triggered pass to extract it again")
+		Eventually(func() ([]byte, error) {
+			return os.ReadFile(tarPath)
+		}, 10*time.Second).Should(Equal([]byte("etcd")))
+		Expect(nodeLabel(ctx, fsNodeKey, fsResourceName)).To(Equal(StatusSynced))
 	})
 })
 

@@ -14,6 +14,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 )
 
 // testTar is the file name used by fixtures that only need a single file.
@@ -28,6 +32,8 @@ const testDigest = "sha256:abc"
 // Archive paths as a cache image carries them, under a directory, and the
 // content fixtures give the first.
 const (
+	etcdTar    = "etcd.tar"
+	pauseTar   = "pause.tar"
 	etcdEntry  = "images/etcd.tar"
 	pauseEntry = "images/pause.tar"
 	etcdBody   = "etcd"
@@ -656,6 +662,7 @@ func TestExtractRecordsWhoWroteTheDirectoryAndFromWhat(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := sn.Record
+	rec.Content = []File{{Name: testTar, Digest: sha256Of("1"), Size: 1}}
 	if !reflect.DeepEqual(got, rec) {
 		t.Errorf("sentinel = %+v, want %+v", got, rec)
 	}
@@ -715,6 +722,7 @@ func TestAdoptOnlyChangesTheOwner(t *testing.T) {
 	}
 	want := seeded
 	want.Owner = OwnerAgent
+	want.Content = []File{{Name: testTar, Digest: sha256Of("1"), Size: 1}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("record = %+v, want %+v", got, want)
 	}
@@ -998,5 +1006,208 @@ func TestGCRemovesATemporaryOnceItsWriterIsGone(t *testing.T) {
 	}
 	if len(removed) != 1 || removed[0] != filepath.Base(tmp) {
 		t.Errorf("unlocked: removed = %v, want %s", removed, filepath.Base(tmp))
+	}
+}
+
+func sha256Of(content string) string {
+	d, _, err := sumOf(strings.NewReader(content))
+	if err != nil {
+		panic(err)
+	}
+	return d
+}
+
+// A file replaced by hand under the same name and with the same size is told
+// by its digest, and the directory reads incomplete so that it is extracted
+// again.
+func TestStateChecksTheContentNotOnlyTheNames(t *testing.T) {
+	var logged []string
+	log := funcr.New(func(prefix, args string) { logged = append(logged, args) }, funcr.Options{})
+	dir, s := t.TempDir(), NewStore(log)
+	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody})); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.State(dir, "x"); err != nil || st != Complete {
+		t.Fatalf("state = %v, %v; want Complete", st, err)
+	}
+	rewrite(t, filepath.Join(dir, "x", etcdTar), "ETCD")
+	if st, err := s.State(dir, "x"); err != nil || st != Incomplete {
+		t.Errorf("same name, same size, other content: state = %v, %v; want Incomplete", st, err)
+	}
+	// The log tells the operator which file and why, ahead of the re-extraction.
+	if len(logged) != 1 || !strings.Contains(logged[0], etcdTar) || !strings.Contains(logged[0], "recorded "+sha256Of(etcdBody)) {
+		t.Errorf("logged %q, want one line naming %s and its recorded digest", logged, etcdTar)
+	}
+}
+
+// rewrite writes content over the file at path, and moves its mtime so that
+// the change shows whatever the timestamp granularity: a write in the tick of
+// the last hash would keep the key otherwise.
+func rewrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The zero Store, the command's, checks names only: it runs on every
+// convergence, and repairing is the agent's job.
+func TestTheZeroStoreChecksOnlyTheNames(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody})); err != nil {
+		t.Fatal(err)
+	}
+	rewrite(t, filepath.Join(dir, "x", etcdTar), "ETCD")
+	if st, err := s.State(dir, "x"); err != nil || st != Complete {
+		t.Errorf("state = %v, %v; want Complete", st, err)
+	}
+}
+
+// A cached file that cannot be read is extracted again, like one that
+// changed: the pass does not fail on it for good.
+func TestStateOfAnUnreadableFileIsIncomplete(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file whatever its mode")
+	}
+	dir, s := t.TempDir(), NewStore(logr.Discard())
+	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody})); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "x", etcdTar)
+	rewrite(t, path, etcdBody)
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.State(dir, "x"); err != nil || st != Incomplete {
+		t.Errorf("state = %v, %v; want Incomplete", st, err)
+	}
+}
+
+// A name the store would not have written is not looked up outside the
+// resource's directory.
+func TestStateDoesNotFollowANameOutOfTheDirectory(t *testing.T) {
+	dir, s := t.TempDir(), NewStore(logr.Discard())
+	res := filepath.Join(dir, "x")
+	if err := os.MkdirAll(res, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "outside"), []byte("o"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sn := `{"digest":"d","owner":"image-cache-agent","files":["../outside"],` +
+		`"content":[{"name":"../outside","digest":"` + sha256Of("o") + `","size":1}]}`
+	if err := os.WriteFile(filepath.Join(res, SentinelName), []byte(sn), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.State(dir, "x"); err != nil || st != Incomplete {
+		t.Errorf("state = %v, %v; want Incomplete", st, err)
+	}
+}
+
+// A file that did not change is not read again: a cache image weighs up to a
+// gigabyte, and a pass runs on every filesystem event. What an extraction
+// wrote is not read again either: it hashed the files on the way.
+func TestStateHashesAFileAgainOnlyOnceItChanged(t *testing.T) {
+	dir, s := t.TempDir(), NewStore(logr.Discard())
+	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody, pauseEntry: "p"})); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if st, err := s.State(dir, "x"); err != nil || st != Complete {
+			t.Fatalf("state = %v, %v; want Complete", st, err)
+		}
+	}
+	if s.sums.hashed != 0 {
+		t.Errorf("hashed %d files over three passes, want 0: the extraction gave the digests", s.sums.hashed)
+	}
+	rewrite(t, filepath.Join(dir, "x", pauseTar), "p")
+	if st, err := s.State(dir, "x"); err != nil || st != Complete {
+		t.Fatalf("rewritten with the same content: state = %v, %v; want Complete", st, err)
+	}
+	if s.sums.hashed != 1 {
+		t.Errorf("hashed %d files, want 1: only the rewritten file is read", s.sums.hashed)
+	}
+}
+
+// A missing file is told without hashing the files listed before it.
+func TestStateTellsAMissingFileBeforeHashing(t *testing.T) {
+	for _, missing := range []string{etcdTar, pauseTar} {
+		t.Run(missing, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := NewStore(logr.Discard()).Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody, pauseEntry: "p"})); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(dir, "x", missing)); err != nil {
+				t.Fatal(err)
+			}
+			// A new store remembers no digest, so any check would read the file.
+			s := NewStore(logr.Discard())
+			if st, err := s.State(dir, "x"); err != nil || st != Incomplete {
+				t.Fatalf("state = %v, %v; want Incomplete", st, err)
+			}
+			if s.sums.hashed != 0 {
+				t.Errorf("hashed %d files, want 0", s.sums.hashed)
+			}
+		})
+	}
+}
+
+// A file hashed shortly after it changed is hashed again: a rewrite in the
+// same timestamp tick would keep its key. Outside the window, the digest
+// holds.
+func TestStateDoesNotTrustADigestTakenRightAfterAChange(t *testing.T) {
+	dir, s := t.TempDir(), NewStore(logr.Discard())
+	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody})); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "x", etcdTar), []byte(etcdBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if st, err := s.State(dir, "x"); err != nil || st != Complete {
+			t.Fatalf("state = %v, %v; want Complete", st, err)
+		}
+	}
+	if s.sums.hashed != 2 {
+		t.Errorf("hashed %d times, want 2: a file that just changed is read on every pass", s.sums.hashed)
+	}
+	s.sums.racy = -time.Hour
+	for range 2 {
+		if st, err := s.State(dir, "x"); err != nil || st != Complete {
+			t.Fatalf("state = %v, %v; want Complete", st, err)
+		}
+	}
+	if s.sums.hashed != 2 {
+		t.Errorf("hashed %d times, want 2: with no window, the digest already taken holds", s.sums.hashed)
+	}
+}
+
+// A sentinel written before the store hashed its files lists only names, and
+// those are all that is checked: an upgrade does not pull everything again.
+func TestStateOfASentinelWithNoContentChecksTheNames(t *testing.T) {
+	dir, s := t.TempDir(), NewStore(logr.Discard())
+	res := filepath.Join(dir, "x")
+	if err := os.MkdirAll(res, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(res, testTar), []byte("anything"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"digest":"d","owner":"image-cache-agent","files":["a.tar"]}`
+	if err := os.WriteFile(filepath.Join(res, SentinelName), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.State(dir, "x"); err != nil || st != Complete {
+		t.Errorf("state = %v, %v; want Complete", st, err)
+	}
+	if err := os.Remove(filepath.Join(res, testTar)); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.State(dir, "x"); err != nil || st != Incomplete {
+		t.Errorf("listed file removed: state = %v, %v; want Incomplete", st, err)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -37,6 +38,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
+	"github.com/scality/image-cache/agent/internal/cache"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -128,6 +130,7 @@ var _ = BeforeSuite(func() {
 		Recorder:  mgr.GetEventRecorder("image-cache-agent-test"),
 		NodeName:  testNodeName,
 		CachePath: cacheDir,
+		Store:     cache.NewStore(logr.Discard()),
 		Puller:    testPuller,
 		Resync:    0,
 	}).SetupWithManager(mgr)).To(Succeed())

@@ -27,7 +27,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -107,10 +106,8 @@ var _ = BeforeSuite(func() {
 
 	By("creating the test node")
 	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   testNodeName,
-			Labels: map[string]string{osLabelKey: osLabelLinux},
-		},
+		Name:   testNodeName,
+		Labels: map[string]string{osLabelKey: osLabelLinux},
 	}
 	Expect(k8sClient.Create(ctx, node)).To(Succeed())
 

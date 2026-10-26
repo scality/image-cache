@@ -1,6 +1,6 @@
 ---
 name: Release
-run-name: Release new ${{ inputs.version-type }} from ${{ github.ref_name }}
+run-name: Release new ${{ inputs.version-type }} from ${{ github.ref_name }}${{ inputs.dry-run && ' (dry run)' || '' }}
 
 on:
   workflow_dispatch:
@@ -17,6 +17,14 @@ on:
         type: choice
         default: "patch"
         options: ["patch", "minor", "major"]
+      dry-run:
+        description: "Compute and validate the tag without pushing it (from main only)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 jobs:
   release:
@@ -25,4 +33,5 @@ jobs:
       version-type: ${{ inputs.version-type }}
       version-scope: ${{ inputs.version-scope }}
       actions-app-id: ${{ vars.ACTIONS_APP_ID }}
+      dry-run: ${{ inputs.dry-run }}
     secrets: inherit

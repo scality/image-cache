@@ -224,7 +224,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
 # renovate: datasource=github-releases depName=golangci/golangci-lint
-GOLANGCI_LINT_VERSION ?= v2.14.0
+GOLANGCI_LINT_VERSION ?= v2.15.0
 # The kind release also pins the Kubernetes version of the e2e cluster, through
 # its default node image.
 # renovate: datasource=github-releases depName=kubernetes-sigs/kind

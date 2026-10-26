@@ -9,7 +9,7 @@ require (
 	github.com/onsi/gomega v1.41.0
 	github.com/scality/go-errors v1.3.0
 	github.com/spf13/cobra v1.10.2
-	go.uber.org/zap v1.27.1
+	go.uber.org/zap v1.28.0
 	golang.org/x/sys v0.49.0
 	k8s.io/api v0.37.1
 	k8s.io/apimachinery v0.37.1

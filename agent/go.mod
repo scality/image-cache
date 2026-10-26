@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/go-containerregistry v0.22.1
-	github.com/onsi/ginkgo/v2 v2.29.0
+	github.com/onsi/ginkgo/v2 v2.33.1
 	github.com/onsi/gomega v1.41.0
 	github.com/scality/go-errors v1.3.0
 	github.com/spf13/cobra v1.10.2

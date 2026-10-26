@@ -4,8 +4,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	imagecachev1alpha1 "github.com/scality/image-cache/agent/api/v1alpha1"
 )
 
@@ -14,8 +12,8 @@ import (
 var _ = Describe("ImageCache validation", func() {
 	create := func(name, source string) error {
 		ic := &imagecachev1alpha1.ImageCache{
-			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec:       imagecachev1alpha1.ImageCacheSpec{Source: source},
+			Name: name,
+			Spec: imagecachev1alpha1.ImageCacheSpec{Source: source},
 		}
 		err := k8sClient.Create(ctx, ic)
 		if err == nil {

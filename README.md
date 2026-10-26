@@ -255,8 +255,8 @@ under the same tag.
 
 ## Development
 
-The agent needs Go 1.26+. The RPM tooling needs Docker, and Go for the
-`imagecachectl` package.
+The agent needs the Go version set in `agent/go.mod`. The RPM tooling needs
+Docker, and Go for the `imagecachectl` package.
 
 ```console
 make -C agent test          # unit tests and the envtest suite

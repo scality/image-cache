@@ -10,7 +10,6 @@ import (
 
 	"github.com/scality/go-errors"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
@@ -225,7 +224,7 @@ func (r *NodeReconciler) patchLabels(ctx context.Context, node *corev1.Node, wan
 func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	toNode := handler.EnqueueRequestsFromMapFunc(
 		func(context.Context, client.Object) []reconcile.Request {
-			return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: r.NodeName}}}
+			return []reconcile.Request{{Name: r.NodeName}}
 		})
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named("node").
@@ -236,7 +235,7 @@ func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// are cleaned up without waiting for a resource event.
 	b = b.WatchesRawSource(source.Func(
 		func(_ context.Context, q workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
-			q.Add(reconcile.Request{NamespacedName: types.NamespacedName{Name: r.NodeName}})
+			q.Add(reconcile.Request{Name: r.NodeName})
 			return nil
 		}))
 

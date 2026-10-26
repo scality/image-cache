@@ -118,16 +118,12 @@ func TestRemotePullResolvesMultiArchIndex(t *testing.T) {
 
 	idx := mutate.AppendManifests(empty.Index,
 		mutate.IndexAddendum{
-			Add: imgAmd,
-			Descriptor: v1.Descriptor{
-				Platform: &v1.Platform{OS: linuxOS, Architecture: amd64Arch},
-			},
+			Add:      imgAmd,
+			Platform: &v1.Platform{OS: linuxOS, Architecture: amd64Arch},
 		},
 		mutate.IndexAddendum{
-			Add: imgArm,
-			Descriptor: v1.Descriptor{
-				Platform: &v1.Platform{OS: linuxOS, Architecture: arm64Arch},
-			},
+			Add:      imgArm,
+			Platform: &v1.Platform{OS: linuxOS, Architecture: arm64Arch},
 		},
 	)
 
@@ -216,10 +212,8 @@ func TestRemotePullNoMatchingPlatform(t *testing.T) {
 
 	idx := mutate.AppendManifests(empty.Index,
 		mutate.IndexAddendum{
-			Add: imgArm,
-			Descriptor: v1.Descriptor{
-				Platform: &v1.Platform{OS: linuxOS, Architecture: arm64Arch},
-			},
+			Add:      imgArm,
+			Platform: &v1.Platform{OS: linuxOS, Architecture: arm64Arch},
 		},
 	)
 

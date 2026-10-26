@@ -17,9 +17,9 @@ All the commands below run from this directory.
 
 ## Prerequisites
 
-- Go 1.26+ for building and testing. controller-gen, kustomize, envtest,
-  golangci-lint and kind are downloaded into `bin/` at pinned versions by the
-  `Makefile`.
+- The Go version set in `go.mod` for building and testing. controller-gen,
+  kustomize, envtest, golangci-lint and kind are downloaded into `bin/` at
+  pinned versions by the `Makefile`.
 - `kubectl`. It is not downloaded: the targets expect it on your `PATH`.
 - Docker, or another `CONTAINER_TOOL`, for the image.
 - A cluster on Kubernetes 1.25+, which is where CEL validation of custom

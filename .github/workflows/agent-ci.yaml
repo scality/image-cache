@@ -66,7 +66,7 @@ jobs:
         run: make -C agent docker-build
 
   e2e:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Without a limit, a cluster that never gets ready holds the runner for
     # the 6 hour default.
     timeout-minutes: 30

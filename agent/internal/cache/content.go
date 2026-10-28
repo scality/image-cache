@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -68,7 +69,7 @@ func (c *sums) trusted(e sumEntry, k sumKey) bool {
 }
 
 // digest returns the digest of the file at path, which info describes.
-func (c *sums) digest(path string, info os.FileInfo) (string, error) {
+func (c *sums) digest(ctx context.Context, path string, info os.FileInfo) (string, error) {
 	key, keyed := keyOf(info)
 	if keyed {
 		c.mu.Lock()
@@ -84,7 +85,7 @@ func (c *sums) digest(path string, info os.FileInfo) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
-	d, _, err := sumOf(f)
+	d, _, err := sumOf(ctxReader{ctx: ctx, r: f})
 	if err != nil {
 		return "", err
 	}
@@ -138,7 +139,7 @@ func (c *sums) forget(dir string) {
 // of another size, is told without reading it. A file that cannot be read
 // does not match either: extracting it again is the repair, for a bad sector
 // as for a changed file.
-func (c *sums) mismatch(dir string, content []File) (file, why string) {
+func (c *sums) mismatch(ctx context.Context, dir string, content []File) (file, why string) {
 	// Every file is checked by name and size before any is read, so a missing
 	// file is told without hashing a gigabyte first.
 	infos := make([]os.FileInfo, len(content))
@@ -160,7 +161,7 @@ func (c *sums) mismatch(dir string, content []File) (file, why string) {
 		infos[i] = info
 	}
 	for i, f := range content {
-		d, err := c.digest(filepath.Join(dir, f.Name), infos[i])
+		d, err := c.digest(ctx, filepath.Join(dir, f.Name), infos[i])
 		switch {
 		case err != nil:
 			return f.Name, err.Error()

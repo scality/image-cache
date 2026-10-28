@@ -79,7 +79,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Re
 	for _, ic := range desired {
 		keep[ic.Name] = true
 		want[ic.Name] = StatusPending
-		state, err := r.Store.State(r.CachePath, ic.Name)
+		state, err := r.Store.State(ctx, r.CachePath, ic.Name)
 		if err != nil {
 			errs = append(errs, errors.Wrap(err, errors.WithProperty("resource", ic.Name)))
 			continue

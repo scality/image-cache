@@ -105,8 +105,9 @@ func (Store) dir(cachePath, name string) string { return filepath.Join(cachePath
 
 // State reports the state of the named resource's directory. Callers must
 // check the returned error before trusting the State: a filesystem error
-// (e.g. permission denied) is reported alongside the zero value Absent.
-func (s Store) State(cachePath, name string) (State, error) {
+// (e.g. permission denied) is reported alongside the zero value Absent. So is
+// a ctx cancelled while the content is checked.
+func (s Store) State(ctx context.Context, cachePath, name string) (State, error) {
 	data, err := os.ReadFile(filepath.Join(s.dir(cachePath, name), SentinelName))
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -128,7 +129,12 @@ func (s Store) State(cachePath, name string) (State, error) {
 		return Incomplete, nil
 	}
 	if s.sums != nil && len(sn.Content) > 0 {
-		if file, why := s.sums.mismatch(s.dir(cachePath, name), sn.Content); why != "" {
+		file, why := s.sums.mismatch(ctx, s.dir(cachePath, name), sn.Content)
+		if err := ctx.Err(); err != nil {
+			return Absent, errors.Wrap(ErrState, errors.CausedBy(err),
+				errors.WithProperty("resource", name))
+		}
+		if why != "" {
 			// The pass that follows extracts it again: this line tells why.
 			s.log.Info("A cached file does not match its sentinel",
 				"resource", name, "file", file, "reason", why)

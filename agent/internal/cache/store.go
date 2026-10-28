@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/go-logr/logr"
 	"github.com/scality/go-errors"
 	"golang.org/x/sys/unix"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -44,7 +45,7 @@ type State int
 const (
 	Absent State = iota
 	// Incomplete: directory present but content untrusted (no sentinel,
-	// corrupt sentinel, or a listed file is missing).
+	// corrupt sentinel, a listed file is missing or its content changed).
 	Incomplete
 	Complete
 )
@@ -58,8 +59,7 @@ const lostFound = "lost+found"
 // it until a resource adopts it.
 const OwnerAgent = "image-cache-agent"
 
-// Record is what the sentinel remembers about a directory's content, beyond
-// the files it lists.
+// Record is what the sentinel remembers about a directory's content.
 type Record struct {
 	// Digest is the manifest digest the source served.
 	Digest string `json:"digest"`
@@ -71,10 +71,15 @@ type Record struct {
 	Source string `json:"source,omitempty"`
 	// Layers are the image's layer diff IDs, as puller.Image reports them.
 	Layers []string `json:"layers,omitempty"`
+	// Content is what the directory holds, file by file, as the extraction
+	// wrote it. A sentinel written before the store hashed its files has
+	// none, and only its file names are checked.
+	Content []File `json:"content,omitempty"`
 }
 
 // sentinel is what the sentinel file holds: the record, and the files the
-// directory has to hold to be complete.
+// directory has to hold to be complete. Files repeats the names of Content:
+// the zero Store, used by imagecachectl, and an older agent read only them.
 type sentinel struct {
 	Record
 	Files []string `json:"files"`
@@ -83,14 +88,26 @@ type sentinel struct {
 // Store reads and writes per-resource cache directories. Resource names are
 // trusted to be Kubernetes object names (DNS-1123: no path separators); they
 // are not sanitized here.
-type Store struct{}
+//
+// The zero value checks only that the files a sentinel lists are there, for
+// imagecachectl. NewStore checks their content too, see "Content check" in
+// agent/DESIGN.md.
+type Store struct {
+	sums *sums
+	log  logr.Logger
+}
+
+// NewStore returns a Store that checks the content of the files, and hashes a
+// file again only once it changed.
+func NewStore(log logr.Logger) Store { return Store{sums: newSums(), log: log} }
 
 func (Store) dir(cachePath, name string) string { return filepath.Join(cachePath, name) }
 
 // State reports the state of the named resource's directory. Callers must
 // check the returned error before trusting the State: a filesystem error
-// (e.g. permission denied) is reported alongside the zero value Absent.
-func (s Store) State(cachePath, name string) (State, error) {
+// (e.g. permission denied) is reported alongside the zero value Absent. So is
+// a ctx cancelled while the content is checked.
+func (s Store) State(ctx context.Context, cachePath, name string) (State, error) {
 	data, err := os.ReadFile(filepath.Join(s.dir(cachePath, name), SentinelName))
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -110,6 +127,20 @@ func (s Store) State(cachePath, name string) (State, error) {
 	var sn sentinel
 	if json.Unmarshal(data, &sn) != nil {
 		return Incomplete, nil
+	}
+	if s.sums != nil && len(sn.Content) > 0 {
+		file, why := s.sums.mismatch(ctx, s.dir(cachePath, name), sn.Content)
+		if err := ctx.Err(); err != nil {
+			return Absent, errors.Wrap(ErrState, errors.CausedBy(err),
+				errors.WithProperty("resource", name))
+		}
+		if why != "" {
+			// The pass that follows extracts it again: this line tells why.
+			s.log.Info("A cached file does not match its sentinel",
+				"resource", name, "file", file, "reason", why)
+			return Incomplete, nil
+		}
+		return Complete, nil
 	}
 	for _, f := range sn.Files {
 		if _, err := os.Stat(filepath.Join(s.dir(cachePath, name), f)); err != nil {
@@ -221,7 +252,7 @@ func (s Store) Extract(
 	// Read-only handle, kept for the lock: a close error loses nothing.
 	defer func() { _ = lock.Close() }()
 
-	var files []string
+	var files []File
 	tr := tar.NewReader(ctxReader{ctx: ctx, r: content})
 	for {
 		if cerr := ctx.Err(); cerr != nil {
@@ -287,7 +318,10 @@ func (s Store) Extract(
 			return errors.Wrap(ErrExtract, errors.CausedBy(oerr),
 				errors.WithDetailf("creating %q", base))
 		}
-		if _, cerr := io.Copy(out, tr); cerr != nil {
+		// Hashed as it is written: the sentinel records what landed on disk
+		// for State to check later, at no extra read.
+		digest, size, cerr := sumOf(io.TeeReader(tr, out))
+		if cerr != nil {
 			return utilerrors.NewAggregate([]error{
 				errors.Wrap(ErrExtract, errors.CausedBy(cerr),
 					errors.WithDetailf("writing %q", base)),
@@ -298,7 +332,7 @@ func (s Store) Extract(
 			return errors.Wrap(ErrExtract, errors.CausedBy(cerr),
 				errors.WithDetailf("closing %q", base))
 		}
-		files = append(files, base)
+		files = append(files, File{Name: base, Digest: digest, Size: size})
 	}
 
 	// An image with nothing in it is a mistake upstream, not an empty cache
@@ -310,7 +344,12 @@ func (s Store) Extract(
 			errors.WithDetail("the image carries no file to cache"))
 	}
 
-	data, err := json.Marshal(sentinel{Record: rec, Files: files})
+	rec.Content = files
+	names := make([]string, 0, len(files))
+	for _, f := range files {
+		names = append(names, f.Name)
+	}
+	data, err := json.Marshal(sentinel{Record: rec, Files: names})
 	if err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("encoding the sentinel"))
@@ -327,10 +366,12 @@ func (s Store) Extract(
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("clearing the previous directory"))
 	}
+	s.sums.forget(final)
 	if err = os.Rename(tmp, final); err != nil {
 		return errors.Wrap(ErrExtract, errors.CausedBy(err),
 			errors.WithDetail("swapping the directory into place"))
 	}
+	s.sums.remember(final, files)
 	return nil
 }
 
@@ -540,6 +581,7 @@ func (s Store) GC(cachePath string, keep map[string]bool) (removed []string, err
 			}
 		}
 		// A link goes, not what it points to.
+		s.sums.forget(path)
 		if err := os.RemoveAll(path); err != nil {
 			errs = append(errs, errors.Wrap(ErrGC, errors.CausedBy(err),
 				errors.WithProperty("entry", e.Name())))

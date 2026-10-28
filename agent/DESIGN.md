@@ -57,7 +57,7 @@ labels:
 - `pending`: the cache content for this resource is not (yet) on disk, or is
   on disk but not yet checked against `spec.source`.
 - `synced`: the tarballs are fully extracted under the resource's cache
-  directory.
+  directory, and their content is the one recorded at extraction.
 
 If a resource stays `pending` longer than expected, look at the events the
 agent records on it. Sync failures, failed checks of a seeded directory and
@@ -121,15 +121,16 @@ complete and records who wrote it:
 
   Give `--cache-path` a directory of its own: anything else there is
   removed.
-- **Completeness**: the sentinel lists the expected file names, so a manually
-  deleted tarball is detected and the directory is extracted again. Whatever
+- **Completeness**: the sentinel lists the expected files with their digest
+  and size, so a tarball deleted or replaced by hand is detected and the
+  directory is extracted again (see "Content check" below). Whatever
   sits at a resource's path with no sentinel, a directory whose sentinel was
   deleted by hand for instance, is replaced by the agent, which owns the cache
   path. A link goes, not what it points to. The one-shot command never
   replaces it (see below).
 - **Traceability**: the sentinel records who wrote the directory, the source
-  it was read from, the manifest digest and the diff IDs of the image's
-  layers.
+  it was read from, the manifest digest, the diff IDs of the image's layers,
+  and the digest of each file.
 
 The name is the agent's own: an entry carrying it inside a cache image is
 skipped, so the sentinel always describes what the store extracted. Entries
@@ -161,6 +162,62 @@ takes it over, see the one-shot command below. Publishing new content means
 creating a new ImageCache (the name carries the version), not editing an
 existing one.
 
+## Content check
+
+The store hashes each file (SHA-256) as it writes it, and records the digest
+and the size in the sentinel. Every pass compares the files on disk with that
+record: a file of another size is told at once, and one of the same size by
+its digest. A mismatch makes the directory incomplete, and the resource is
+extracted again like after a deletion.
+
+Hashing a cache image at every pass would read up to a gigabyte on every
+filesystem event. The agent remembers the digest of each file in memory, with
+the device, inode, size, mtime and ctime it had, and hashes a file again only
+when one of them changed. ctime is what makes this hold: `touch -r` restores
+mtime, while nothing short of setting the clock restores ctime. An extraction
+seeds that memory with the digests it computed, so the passes after it read
+nothing. An agent that restarts hashes every file once.
+
+Timestamps move by ticks, a second on some filesystems, so a file rewritten
+in the tick it was hashed in would keep its key. A digest taken less than two
+seconds after the file last changed is therefore not trusted, as Git does
+with its racy entries, and the file is read again on the next pass. The
+digests an extraction computed are trusted at once: they come from the bytes
+written, and reading a gigabyte again right after a pull is what the memory
+avoids. A same-size rewrite in that tick is seen only when the agent restarts.
+
+So the check sees what goes through the filesystem. A change that touches no
+metadata, bit rot or a write below the filesystem, is seen only when the
+agent restarts.
+
+The sentinel is the reference, so a file changed together with the digests
+of its sentinel is not seen. Writing there takes root on the node or the
+agent's uid, which can also replace the images in containerd or the agent
+itself. The check repairs mistakes and accidents. It is not a defence
+against an attacker on the node.
+
+A JSON file of digests was rejected: it would be one more entry in the cache
+path for garbage collection, the watcher and the one-shot command to know
+about, to save one read per restart.
+
+A label in the cache image listing each file with its digest and size was
+rejected for now, as the gain is small. The layers are already checked
+against the manifest while they are pulled, and the digests are taken from
+the same stream as the files are written. Comparing a seeded directory with
+an image without pulling it is done by the diff IDs (see "Adopting a seeded
+directory"). What the label would add: catch a badly packaged build, and,
+with an image of several layers, tell which files a layer brings. It is worth
+a look again if the boot cache images get more than one layer.
+
+`imagecachectl` checks names only. It runs on every convergence, reading a
+gigabyte each time to find nothing to do would be its whole cost, and
+repairing is the agent's job.
+
+A sentinel written before the store hashed its files lists only names, and
+only the names are checked, for as long as its resource exists. An upgrade
+that replaces the ImageCache resources has garbage collection remove those
+directories with the old resources. An agent upgraded alone keeps them.
+
 ## Reconciliation model
 
 The agent reconciles the node as a whole rather than one ImageCache at a
@@ -179,9 +236,12 @@ Triggers:
   but not a single tarball deleted inside one. Watchers are set again after
   each pass, since resource directories come and go and a sync replaces one
   at the same path. Temporary directories are
-  not watched, and writes are ignored except to a sentinel: a pass reads the
-  sentinel and checks that the files it lists exist, and an extraction by
-  another process would otherwise trigger one pass per write.
+  not watched, so an extraction, by the agent or by another process, raises
+  no event until its rename. A write in a resource directory triggers, since
+  a pass checks the content of the files. A write at the root goes to a flat
+  file, which no pass checks, and is ignored: a copy of a large archive would
+  otherwise trigger pass after pass. A burst of writes collapses into one
+  pass in the workqueue.
 - A periodic resync as a safety net, every hour by default
   (`--resync-period`). It is not what retries a failed pass, which is
   requeued with backoff, nor what repairs tampering, which raises a
@@ -375,8 +435,9 @@ The agent never writes ImageCache resources (no status, no finalizers).
 
 ## Testing
 
-- Unit tests: cache store (atomic extraction, sentinel handling, garbage
-  collection ownership rules), node-selector matching, label diffing.
+- Unit tests: cache store (atomic extraction, sentinel handling, content
+  check and its memory, garbage collection ownership rules), node-selector
+  matching, label diffing.
 - Puller tests against go-containerregistry's in-memory registry, pulling a
   forged image whose layers contain tarballs.
 - envtest: the full reconciler with a fake puller, from resource lifecycle to
@@ -388,6 +449,7 @@ The agent never writes ImageCache resources (no status, no finalizers).
   nobody listens on leaves the node `pending`. Two registries run in the
   cluster: a pull over plain HTTP lands on the selected node only, and a
   registry signed by a private CA is refused until the shipped CA patch is
-  applied. `imagecachectl` seeds two directories on the worker: the agent
-  adopts the one holding the image its resource names, with no extraction,
-  and replaces the other.
+  applied. An archive rewritten on the node with other content of the same
+  size is extracted again. `imagecachectl` seeds two directories on the
+  worker: the agent adopts the one holding the image its resource names, with
+  no extraction, and replaces the other.

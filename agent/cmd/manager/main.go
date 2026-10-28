@@ -244,6 +244,7 @@ func main() {
 		Recorder:  mgr.GetEventRecorder("image-cache-agent"),
 		NodeName:  nodeName,
 		CachePath: cachePath,
+		Store:     cache.NewStore(ctrl.Log.WithName("cache")),
 		Puller:    remote,
 		FS:        fw,
 		Resync:    resyncPeriod,

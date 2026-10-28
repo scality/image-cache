@@ -14,6 +14,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 )
 
 // testTar is the file name used by fixtures that only need a single file.
@@ -28,6 +32,8 @@ const testDigest = "sha256:abc"
 // Archive paths as a cache image carries them, under a directory, and the
 // content fixtures give the first.
 const (
+	etcdTar    = "etcd.tar"
+	pauseTar   = "pause.tar"
 	etcdEntry  = "images/etcd.tar"
 	pauseEntry = "images/pause.tar"
 	etcdBody   = "etcd"
@@ -97,7 +103,7 @@ func TestExtractFlattensAndCompletes(t *testing.T) {
 			t.Errorf("missing %s: %v", f, err)
 		}
 	}
-	if st, _ := s.State(dir, "worker-134-0-0"); st != Complete {
+	if st, _ := s.State(t.Context(), dir, "worker-134-0-0"); st != Complete {
 		t.Errorf("state = %v, want Complete", st)
 	}
 }
@@ -131,7 +137,7 @@ func TestExtractIgnoresAnImagesOwnSentinel(t *testing.T) {
 	if !strings.Contains(string(data), testDigest) {
 		t.Errorf("sentinel not written by the store: %s", data)
 	}
-	if st, _ := s.State(dir, "c"); st != Complete {
+	if st, _ := s.State(t.Context(), dir, "c"); st != Complete {
 		t.Errorf("state = %v, want Complete", st)
 	}
 }
@@ -170,7 +176,7 @@ func TestExtractConfinesHostileEntries(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(dir, "c", "subdir")); !os.IsNotExist(err) {
 		t.Error("the directory entry was created")
 	}
-	if st, _ := s.State(dir, "c"); st != Complete {
+	if st, _ := s.State(t.Context(), dir, "c"); st != Complete {
 		t.Errorf("state = %v, want Complete", st)
 	}
 }
@@ -266,7 +272,7 @@ func TestExtractRefusesNonRegularEntries(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.entry.Name) || !strings.Contains(err.Error(), tc.kind) {
 				t.Errorf("err = %v, want it to name %q as %s", err, tc.entry.Name, tc.kind)
 			}
-			if st, _ := s.State(dir, "c"); st != Absent {
+			if st, _ := s.State(t.Context(), dir, "c"); st != Absent {
 				t.Errorf("state = %v, want Absent", st)
 			}
 			entries, rerr := os.ReadDir(dir)
@@ -290,7 +296,7 @@ func TestExtractStopsOnCancelledContext(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
-	if st, _ := s.State(dir, "c"); st != Absent {
+	if st, _ := s.State(t.Context(), dir, "c"); st != Absent {
 		t.Errorf("state = %v, want Absent: a cancelled extraction must leave nothing", st)
 	}
 }
@@ -343,7 +349,7 @@ func TestExtractStopsInTheMiddleOfAnEntry(t *testing.T) {
 	if src.read >= size {
 		t.Errorf("read %d bytes, the whole entry: cancellation waited for its end", src.read)
 	}
-	if st, _ := s.State(dir, "c"); st != Absent {
+	if st, _ := s.State(t.Context(), dir, "c"); st != Absent {
 		t.Errorf("state = %v, want Absent", st)
 	}
 }
@@ -357,13 +363,13 @@ func (zeros) Read(p []byte) (int, error) {
 
 func TestState(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
-	if st, _ := s.State(dir, "none"); st != Absent {
+	if st, _ := s.State(t.Context(), dir, "none"); st != Absent {
 		t.Errorf("missing dir: state = %v, want Absent", st)
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "bare"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := s.State(dir, "bare"); st != Incomplete {
+	if st, _ := s.State(t.Context(), dir, "bare"); st != Incomplete {
 		t.Errorf("no sentinel: state = %v, want Incomplete", st)
 	}
 	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{testTar: "1"})); err != nil {
@@ -372,7 +378,7 @@ func TestState(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "x", testTar)); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := s.State(dir, "x"); st != Incomplete {
+	if st, _ := s.State(t.Context(), dir, "x"); st != Incomplete {
 		t.Errorf("missing listed file: state = %v, want Incomplete", st)
 	}
 	// What is not a directory holds no resource, and is no error either.
@@ -383,7 +389,7 @@ func TestState(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"file", "loop"} {
-		if st, err := s.State(dir, name); err != nil || st != Incomplete {
+		if st, err := s.State(t.Context(), dir, name); err != nil || st != Incomplete {
 			t.Errorf("%s: state = %v, err = %v, want Incomplete", name, st, err)
 		}
 	}
@@ -448,7 +454,7 @@ func TestStateCorruptSentinel(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "c", SentinelName), []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st, err := s.State(dir, "c")
+	st, err := s.State(t.Context(), dir, "c")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -462,7 +468,7 @@ func TestExtractReplacesExistingDir(t *testing.T) {
 	if err := s.Extract(t.Context(), dir, "r", Record{Digest: digestD1}, tarStream(t, map[string]string{oldTarName: "1"})); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := s.State(dir, "r"); st != Complete {
+	if st, _ := s.State(t.Context(), dir, "r"); st != Complete {
 		t.Fatalf("first extraction: state = %v, want Complete", st)
 	}
 	if err := s.Extract(t.Context(), dir, "r", Record{Digest: digestD2}, tarStream(t, map[string]string{newTarName: "2"})); err != nil {
@@ -474,7 +480,7 @@ func TestExtractReplacesExistingDir(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "r", oldTarName)); !os.IsNotExist(err) {
 		t.Errorf("%s must be gone after replacement", oldTarName)
 	}
-	if st, _ := s.State(dir, "r"); st != Complete {
+	if st, _ := s.State(t.Context(), dir, "r"); st != Complete {
 		t.Errorf("second extraction: state = %v, want Complete", st)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "r", SentinelName))
@@ -587,7 +593,7 @@ func TestExtractRefusesAnImageWithNothingToCache(t *testing.T) {
 	if !strings.Contains(err.Error(), "no file to cache") {
 		t.Errorf("err = %v, want it to say what was found", err)
 	}
-	if st, _ := s.State(dir, "empty"); st != Absent {
+	if st, _ := s.State(t.Context(), dir, "empty"); st != Absent {
 		t.Errorf("state = %v, want Absent: the refusal left something behind", st)
 	}
 	entries, rerr := os.ReadDir(dir)
@@ -634,7 +640,7 @@ func TestExtractRefusesAStreamEndingInAWrappedEOF(t *testing.T) {
 	if err == nil {
 		t.Fatal("a stream that failed was published as complete")
 	}
-	if st, _ := s.State(dir, "c"); st != Absent {
+	if st, _ := s.State(t.Context(), dir, "c"); st != Absent {
 		t.Errorf("state = %v, want Absent", st)
 	}
 }
@@ -656,6 +662,7 @@ func TestExtractRecordsWhoWroteTheDirectoryAndFromWhat(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := sn.Record
+	rec.Content = []File{{Name: testTar, Digest: sha256Of("1"), Size: 1}}
 	if !reflect.DeepEqual(got, rec) {
 		t.Errorf("sentinel = %+v, want %+v", got, rec)
 	}
@@ -715,10 +722,11 @@ func TestAdoptOnlyChangesTheOwner(t *testing.T) {
 	}
 	want := seeded
 	want.Owner = OwnerAgent
+	want.Content = []File{{Name: testTar, Digest: sha256Of("1"), Size: 1}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("record = %+v, want %+v", got, want)
 	}
-	if st, err := s.State(dir, "c"); err != nil || st != Complete {
+	if st, err := s.State(t.Context(), dir, "c"); err != nil || st != Complete {
 		t.Errorf("state = %v, %v; want Complete", st, err)
 	}
 	if data, err := os.ReadFile(filepath.Join(dir, "c", testTar)); err != nil || string(data) != "1" {
@@ -971,7 +979,7 @@ func TestGCAndSweepLeaveATemporaryBeingWritten(t *testing.T) {
 	if len(removed) != 0 {
 		t.Errorf("removed %v while it was written", removed)
 	}
-	if st, _ := s.State(dir, "worker"); st != Complete {
+	if st, _ := s.State(t.Context(), dir, "worker"); st != Complete {
 		t.Errorf("state = %v, want Complete", st)
 	}
 }
@@ -998,5 +1006,228 @@ func TestGCRemovesATemporaryOnceItsWriterIsGone(t *testing.T) {
 	}
 	if len(removed) != 1 || removed[0] != filepath.Base(tmp) {
 		t.Errorf("unlocked: removed = %v, want %s", removed, filepath.Base(tmp))
+	}
+}
+
+func sha256Of(content string) string {
+	d, _, err := sumOf(strings.NewReader(content))
+	if err != nil {
+		panic(err)
+	}
+	return d
+}
+
+// A file replaced by hand under the same name and with the same size is told
+// by its digest, and the directory reads incomplete so that it is extracted
+// again.
+func TestStateChecksTheContentNotOnlyTheNames(t *testing.T) {
+	var logged []string
+	log := funcr.New(func(prefix, args string) { logged = append(logged, args) }, funcr.Options{})
+	dir, s := t.TempDir(), NewStore(log)
+	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody})); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Complete {
+		t.Fatalf("state = %v, %v; want Complete", st, err)
+	}
+	rewrite(t, filepath.Join(dir, "x", etcdTar), "ETCD")
+	if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Incomplete {
+		t.Errorf("same name, same size, other content: state = %v, %v; want Incomplete", st, err)
+	}
+	// The log tells the operator which file and why, ahead of the re-extraction.
+	if len(logged) != 1 || !strings.Contains(logged[0], etcdTar) || !strings.Contains(logged[0], "recorded "+sha256Of(etcdBody)) {
+		t.Errorf("logged %q, want one line naming %s and its recorded digest", logged, etcdTar)
+	}
+}
+
+// A pass cancelled while it hashes stops there, and says so: the content is
+// not known, so it is neither complete nor to extract again.
+func TestStateStopsHashingWhenCancelled(t *testing.T) {
+	var logged []string
+	log := funcr.New(func(prefix, args string) { logged = append(logged, args) }, funcr.Options{})
+	dir := t.TempDir()
+	if err := NewStore(log).Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody})); err != nil {
+		t.Fatal(err)
+	}
+	// A new store remembers no digest, so the check has to read the file.
+	s := NewStore(log)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	st, err := s.State(ctx, dir, "x")
+	if !errors.Is(err, ErrState) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("state = %v, %v; want ErrState caused by context.Canceled", st, err)
+	}
+	if len(logged) != 0 {
+		t.Errorf("logged %q, want nothing: a cancelled pass found no mismatch", logged)
+	}
+}
+
+// rewrite writes content over the file at path, and moves its mtime so that
+// the change shows whatever the timestamp granularity: a write in the tick of
+// the last hash would keep the key otherwise.
+func rewrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, past, past); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The zero Store, the command's, checks names only: it runs on every
+// convergence, and repairing is the agent's job.
+func TestTheZeroStoreChecksOnlyTheNames(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody})); err != nil {
+		t.Fatal(err)
+	}
+	rewrite(t, filepath.Join(dir, "x", etcdTar), "ETCD")
+	if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Complete {
+		t.Errorf("state = %v, %v; want Complete", st, err)
+	}
+}
+
+// A cached file that cannot be read is extracted again, like one that
+// changed: the pass does not fail on it for good.
+func TestStateOfAnUnreadableFileIsIncomplete(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file whatever its mode")
+	}
+	dir, s := t.TempDir(), NewStore(logr.Discard())
+	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody})); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "x", etcdTar)
+	rewrite(t, path, etcdBody)
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Incomplete {
+		t.Errorf("state = %v, %v; want Incomplete", st, err)
+	}
+}
+
+// A name the store would not have written is not looked up outside the
+// resource's directory.
+func TestStateDoesNotFollowANameOutOfTheDirectory(t *testing.T) {
+	dir, s := t.TempDir(), NewStore(logr.Discard())
+	res := filepath.Join(dir, "x")
+	if err := os.MkdirAll(res, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "outside"), []byte("o"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sn := `{"digest":"d","owner":"image-cache-agent","files":["../outside"],` +
+		`"content":[{"name":"../outside","digest":"` + sha256Of("o") + `","size":1}]}`
+	if err := os.WriteFile(filepath.Join(res, SentinelName), []byte(sn), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Incomplete {
+		t.Errorf("state = %v, %v; want Incomplete", st, err)
+	}
+}
+
+// A file that did not change is not read again: a cache image weighs up to a
+// gigabyte, and a pass runs on every filesystem event. What an extraction
+// wrote is not read again either: it hashed the files on the way.
+func TestStateHashesAFileAgainOnlyOnceItChanged(t *testing.T) {
+	dir, s := t.TempDir(), NewStore(logr.Discard())
+	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody, pauseEntry: "p"})); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Complete {
+			t.Fatalf("state = %v, %v; want Complete", st, err)
+		}
+	}
+	if s.sums.hashed != 0 {
+		t.Errorf("hashed %d files over three passes, want 0: the extraction gave the digests", s.sums.hashed)
+	}
+	rewrite(t, filepath.Join(dir, "x", pauseTar), "p")
+	if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Complete {
+		t.Fatalf("rewritten with the same content: state = %v, %v; want Complete", st, err)
+	}
+	if s.sums.hashed != 1 {
+		t.Errorf("hashed %d files, want 1: only the rewritten file is read", s.sums.hashed)
+	}
+}
+
+// A missing file is told without hashing the files listed before it.
+func TestStateTellsAMissingFileBeforeHashing(t *testing.T) {
+	for _, missing := range []string{etcdTar, pauseTar} {
+		t.Run(missing, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := NewStore(logr.Discard()).Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody, pauseEntry: "p"})); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(dir, "x", missing)); err != nil {
+				t.Fatal(err)
+			}
+			// A new store remembers no digest, so any check would read the file.
+			s := NewStore(logr.Discard())
+			if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Incomplete {
+				t.Fatalf("state = %v, %v; want Incomplete", st, err)
+			}
+			if s.sums.hashed != 0 {
+				t.Errorf("hashed %d files, want 0", s.sums.hashed)
+			}
+		})
+	}
+}
+
+// A file hashed shortly after it changed is hashed again: a rewrite in the
+// same timestamp tick would keep its key. Outside the window, the digest
+// holds.
+func TestStateDoesNotTrustADigestTakenRightAfterAChange(t *testing.T) {
+	dir, s := t.TempDir(), NewStore(logr.Discard())
+	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody})); err != nil {
+		t.Fatal(err)
+	}
+	rewrite(t, filepath.Join(dir, "x", etcdTar), etcdBody)
+	for range 2 {
+		if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Complete {
+			t.Fatalf("state = %v, %v; want Complete", st, err)
+		}
+	}
+	if s.sums.hashed != 2 {
+		t.Errorf("hashed %d times, want 2: a file that just changed is read on every pass", s.sums.hashed)
+	}
+	s.sums.racy = -time.Hour
+	for range 2 {
+		if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Complete {
+			t.Fatalf("state = %v, %v; want Complete", st, err)
+		}
+	}
+	if s.sums.hashed != 2 {
+		t.Errorf("hashed %d times, want 2: with no window, the digest already taken holds", s.sums.hashed)
+	}
+}
+
+// A sentinel written before the store hashed its files lists only names, and
+// those are all that is checked: an upgrade does not pull everything again.
+func TestStateOfASentinelWithNoContentChecksTheNames(t *testing.T) {
+	dir, s := t.TempDir(), NewStore(logr.Discard())
+	res := filepath.Join(dir, "x")
+	if err := os.MkdirAll(res, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(res, testTar), []byte("anything"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"digest":"d","owner":"image-cache-agent","files":["a.tar"]}`
+	if err := os.WriteFile(filepath.Join(res, SentinelName), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Complete {
+		t.Errorf("state = %v, %v; want Complete", st, err)
+	}
+	if err := os.Remove(filepath.Join(res, testTar)); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := s.State(t.Context(), dir, "x"); err != nil || st != Incomplete {
+		t.Errorf("listed file removed: state = %v, %v; want Incomplete", st, err)
 	}
 }

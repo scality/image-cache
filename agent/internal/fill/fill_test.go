@@ -75,7 +75,7 @@ func TestFillExtractsAndClosesTheStream(t *testing.T) {
 	if err := Fill(t.Context(), cache.Store{}, p, dir, resource, "ref", cache.OwnerAgent, nil); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := (cache.Store{}).State(dir, resource); st != cache.Complete {
+	if st, _ := (cache.Store{}).State(t.Context(), dir, resource); st != cache.Complete {
 		t.Errorf("state = %v, want Complete", st)
 	}
 	if !p.closed {

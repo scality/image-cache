@@ -22,6 +22,8 @@ type FSWatcher struct {
 	mu      sync.Mutex
 	watcher *fsnotify.Watcher
 	paths   map[string]bool
+	// roots are the cache paths, whose writes do not trigger a pass.
+	roots map[string]bool
 	// trigger is the synthetic event pushed on every change. It is named
 	// after the node so that the reconcile key in the manager's log lines
 	// identifies the node this agent converges.
@@ -71,10 +73,13 @@ func (f *FSWatcher) Start(ctx context.Context) error {
 			if !ok {
 				return f.closed(ctx)
 			}
-			// A pass reads the sentinel and checks that the files it lists
-			// exist. A write to any other file cannot change its result, and
-			// an extraction writes thousands of times.
-			if ev.Op == fsnotify.Write && filepath.Base(ev.Name) != cache.SentinelName {
+			// A write in a resource directory triggers: a pass checks the
+			// content of the cached files. A write at the root goes to a flat
+			// file, which no pass checks, and a copy writes thousands of
+			// times. An extraction writes into a temporary directory, which
+			// is not watched. A burst of writes collapses in the buffer below
+			// and in the workqueue.
+			if ev.Has(fsnotify.Write) && f.isRoot(filepath.Dir(ev.Name)) {
 				continue
 			}
 			select {
@@ -111,6 +116,13 @@ func (f *FSWatcher) closed(ctx context.Context) error {
 // runs on, and there is no leader among them.
 func (f *FSWatcher) NeedLeaderElection() bool { return false }
 
+// isRoot reports whether dir is one of the cache paths.
+func (f *FSWatcher) isRoot(dir string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.roots[dir]
+}
+
 // SetPaths adjusts the watched directories to exactly roots and their
 // immediate subdirectories. Watching the roots alone would report a whole
 // resource directory disappearing but not a single tarball deleted inside
@@ -141,6 +153,10 @@ func (f *FSWatcher) SetPaths(roots []string) {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.roots = map[string]bool{}
+	for _, root := range roots {
+		f.roots[filepath.Clean(root)] = true
+	}
 	for p := range f.paths {
 		if !want[p] {
 			// Removal of an already-deleted directory fails harmlessly;

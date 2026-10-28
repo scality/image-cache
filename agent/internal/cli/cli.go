@@ -175,7 +175,7 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out
 	// Answered from the disk alone. A node that already holds the archives
 	// reaches no registry, which is what lets this run on every convergence
 	// rather than only at install.
-	state, err := store.State(cachePath, name)
+	state, err := store.State(ctx, cachePath, name)
 	if err != nil {
 		return err
 	}

@@ -1164,9 +1164,7 @@ func TestStateDoesNotTrustADigestTakenRightAfterAChange(t *testing.T) {
 	if err := s.Extract(t.Context(), dir, "x", Record{Digest: "d"}, tarStream(t, map[string]string{etcdEntry: etcdBody})); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "x", etcdTar), []byte(etcdBody), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	rewrite(t, filepath.Join(dir, "x", etcdTar), etcdBody)
 	for range 2 {
 		if st, err := s.State(dir, "x"); err != nil || st != Complete {
 			t.Fatalf("state = %v, %v; want Complete", st, err)

@@ -214,9 +214,9 @@ gigabyte each time to find nothing to do would be its whole cost, and
 repairing is the agent's job.
 
 A sentinel written before the store hashed its files lists only names, and
-only the names are checked, for as long as its resource exists. After a
-MetalK8s upgrade, garbage collection removes those directories with the
-resources of the previous version. An agent upgraded alone keeps them.
+only the names are checked, for as long as its resource exists. An upgrade
+that replaces the ImageCache resources has garbage collection remove those
+directories with the old resources. An agent upgraded alone keeps them.
 
 ## Reconciliation model
 

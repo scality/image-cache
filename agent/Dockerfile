@@ -2,7 +2,7 @@
 # Override BASE_IMAGE to build from another registry. Keep a digest and a Go
 # version no older than the go directive of go.mod, e.g.
 # <mirror>/library/golang:1.27@sha256:<digest>.
-ARG BASE_IMAGE=golang:1.27@sha256:f24164268fc1e741bbdc0066dbadcf1c8426c5a8489f0729c02c3905a53032fd
+ARG BASE_IMAGE=golang:1.27@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b
 FROM ${BASE_IMAGE} AS builder
 ARG TARGETOS=linux
 # The agent only ships for amd64 (see DESIGN.md).

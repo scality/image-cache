@@ -95,6 +95,9 @@ type sentinel struct {
 type Store struct {
 	sums *sums
 	log  logr.Logger
+	// beforeLock, when set, runs between the creation of a temporary
+	// directory and its lock. Tests use it to stand for GC.
+	beforeLock func(dir string)
 }
 
 // NewStore returns a Store that checks the content of the files, and hashes a
@@ -225,30 +228,23 @@ func (s Store) readSentinel(cachePath, name string) (sentinel, error) {
 // be called concurrently for the same name. A failed extraction leaves either
 // the previous state or a hidden temporary directory that GC removes later.
 // The temporary directory is locked while it is written, so that GC and
-// SweepTemporaries, in this process or another, leave it alone.
+// SweepTemporaries, in this process or another, leave it alone (see
+// createTemporary for the window before the lock).
 //
 // Every read honours ctx, inside an entry too: an entry can be hundreds of
 // megabytes, and nothing else watches ctx when the source is a local archive.
 func (s Store) Extract(
 	ctx context.Context, cachePath, name string, rec Record, content io.Reader,
 ) (err error) {
-	tmp, err := os.MkdirTemp(cachePath, "."+name+".tmp-")
+	tmp, lock, err := s.createTemporary(cachePath, name)
 	if err != nil {
-		return errors.Wrap(ErrExtract, errors.CausedBy(err),
-			errors.WithDetail("creating the temporary directory"),
-			errors.WithProperty("resource", name))
+		return err
 	}
 	defer func() {
 		if err != nil {
 			err = utilerrors.NewAggregate([]error{err, os.RemoveAll(tmp)})
 		}
 	}()
-	lock, err := lockTemporary(tmp)
-	if err != nil {
-		return errors.Wrap(ErrExtract, errors.CausedBy(err),
-			errors.WithDetail("locking the temporary directory"),
-			errors.WithProperty("resource", name))
-	}
 	// Read-only handle, kept for the lock: a close error loses nothing.
 	defer func() { _ = lock.Close() }()
 
@@ -476,10 +472,54 @@ func (s Store) SweepTemporaries(cachePath, name string) ([]string, error) {
 	return removed, utilerrors.NewAggregate(errs)
 }
 
+// temporaryTries bounds how many temporary directories Extract creates when
+// GC keeps removing them before they are locked. Each loss needs a GC pass in
+// a window of a few system calls, so a third one in a row means something
+// else removes them.
+const temporaryTries = 3
+
+// createTemporary creates and locks the temporary directory of an extraction
+// of name. A directory cannot be created already locked, so GC can remove it
+// in between: a new one is then created, up to temporaryTries times.
+func (s Store) createTemporary(cachePath, name string) (string, *os.File, error) {
+	var lost error
+	for range temporaryTries {
+		tmp, err := os.MkdirTemp(cachePath, "."+name+".tmp-")
+		if err != nil {
+			return "", nil, errors.Wrap(ErrExtract, errors.CausedBy(err),
+				errors.WithDetail("creating the temporary directory"),
+				errors.WithProperty("resource", name))
+		}
+		if s.beforeLock != nil {
+			s.beforeLock(tmp)
+		}
+		lock, err := lockTemporary(tmp)
+		if errors.Is(err, os.ErrNotExist) {
+			lost = err
+			s.log.Info("The temporary directory was removed before it was locked, creating another one",
+				"resource", name, "directory", filepath.Base(tmp))
+			continue
+		}
+		if err != nil {
+			return "", nil, utilerrors.NewAggregate([]error{
+				errors.Wrap(ErrExtract, errors.CausedBy(err),
+					errors.WithDetail("locking the temporary directory"),
+					errors.WithProperty("resource", name)),
+				os.RemoveAll(tmp),
+			})
+		}
+		return tmp, lock, nil
+	}
+	return "", nil, errors.Wrap(ErrExtract, errors.CausedBy(lost),
+		errors.WithDetailf("the temporary directory was removed before it could be locked, %d times in a row",
+			temporaryTries),
+		errors.WithProperty("resource", name))
+}
+
 // lockTemporary takes an exclusive lock on the temporary directory dir. The
 // lock lasts until the returned file is closed, or the process dies. GC may
 // remove dir between its creation and the lock, so dir is checked again once
-// locked.
+// locked, and a removed dir is reported as os.ErrNotExist.
 func lockTemporary(dir string) (*os.File, error) {
 	f, err := os.Open(dir)
 	if err != nil {

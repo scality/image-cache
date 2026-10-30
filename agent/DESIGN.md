@@ -153,7 +153,10 @@ the target; garbage collection removes it on a later pass, the same as an
 orphaned resource directory. The writer holds a `flock` on that directory
 until it is done, and garbage collection skips a locked one: an import run by
 hand on a node where the agent runs is not removed while it writes. The lock
-goes with the process, so a crash does not leave it held.
+goes with the process, so a crash does not leave it held. A directory cannot
+be created already locked, so garbage collection can still remove it before
+the writer locks it. The writer sees it gone and creates another one, up to
+three directories in all.
 
 A resource whose directory is complete and written by the agent is never
 re-pulled: `spec.source` is effectively immutable once synced. A directory

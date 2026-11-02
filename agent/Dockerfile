@@ -1,8 +1,8 @@
 # Build the manager binary
 # Override BASE_IMAGE to build from another registry. Keep a digest and a Go
 # version no older than the go directive of go.mod, e.g.
-# <mirror>/library/golang:1.27@sha256:<digest>.
-ARG BASE_IMAGE=golang:1.27@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b
+# <mirror>/library/golang:1.27.3-alpine@sha256:<digest>.
+ARG BASE_IMAGE=golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
 FROM ${BASE_IMAGE} AS builder
 ARG TARGETOS=linux
 # The agent only ships for amd64 (see DESIGN.md).
@@ -29,9 +29,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 # The agent runs as UID 65532 and writes in a root-owned cache path, so it
 # needs cap_dac_override as a file capability. See "Container image and
 # deployment" in DESIGN.md. BuildKit keeps the xattr across the COPY below.
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends libcap2-bin \
-    && rm -rf /var/lib/apt/lists/* \
+RUN apk add --no-cache libcap \
     && setcap cap_dac_override+ep manager \
     && getcap manager
 

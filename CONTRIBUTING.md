@@ -29,6 +29,8 @@ in [agent/README.md](agent/README.md#deploying).
 
 ## Development environment
 
+The devcontainer in `.devcontainer/` has Go, Docker and `kubectl`.
+
 The agent needs the Go version set in `agent/go.mod`. controller-gen,
 kustomize, envtest, golangci-lint and kind are downloaded into `agent/bin/` at
 pinned versions by the `Makefile`, so those need no manual install. `kubectl`

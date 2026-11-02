@@ -102,7 +102,7 @@ const registryNamespace = "image-cache-e2e-registry"
 // on every run. Renovate reads the tag and digest alone.
 //
 // renovate: datasource=docker depName=docker.io/library/registry
-const registryVersion = "3.1.2@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8"
+const registryVersion = "3.1.2@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3"
 
 const registryImage = "docker.io/library/registry:" + registryVersion
 

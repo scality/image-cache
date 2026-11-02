@@ -984,6 +984,58 @@ func TestGCAndSweepLeaveATemporaryBeingWritten(t *testing.T) {
 	}
 }
 
+// GC can pass between the creation of the temporary directory and its lock:
+// it sees a directory nobody holds and removes it.
+func TestExtractStartsAgainWhenGCRemovesItsTemporary(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	calls := 0
+	s.beforeLock = func(string) {
+		calls++
+		if calls > 1 {
+			return
+		}
+		if removed, err := s.SweepTemporaries(dir, "worker"); err != nil || len(removed) != 1 {
+			t.Fatalf("sweep: removed = %v, err = %v, want one", removed, err)
+		}
+	}
+	stream := tarStream(t, map[string]string{etcdEntry: "e"})
+	if err := s.Extract(t.Context(), dir, "worker", Record{Digest: testDigest}, stream); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Errorf("temporary directories created = %d, want 2", calls)
+	}
+	if st, _ := s.State(t.Context(), dir, "worker"); st != Complete {
+		t.Errorf("state = %v, want Complete", st)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("cache path holds %v, want only the resource", entries)
+	}
+}
+
+func TestExtractGivesUpWhenItsTemporaryKeepsDisappearing(t *testing.T) {
+	dir, s := t.TempDir(), Store{}
+	calls := 0
+	s.beforeLock = func(tmp string) {
+		calls++
+		if err := os.Remove(tmp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stream := tarStream(t, map[string]string{etcdEntry: "e"})
+	err := s.Extract(t.Context(), dir, "worker", Record{Digest: testDigest}, stream)
+	if !errors.Is(err, ErrExtract) || !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("err = %v, want ErrExtract caused by os.ErrNotExist", err)
+	}
+	if calls != temporaryTries {
+		t.Errorf("temporary directories created = %d, want %d", calls, temporaryTries)
+	}
+}
+
 func TestGCRemovesATemporaryOnceItsWriterIsGone(t *testing.T) {
 	dir, s := t.TempDir(), Store{}
 	tmp, err := os.MkdirTemp(dir, ".worker.tmp-")

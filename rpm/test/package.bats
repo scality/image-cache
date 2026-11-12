@@ -35,6 +35,15 @@ assert_linter_clean() {
     rpm -qpR "$RPM" | grep -qx "containerd"
 }
 
+@test "package requires jq and tar, which the script reads archive indexes with" {
+    rpm -qpR "$RPM" | grep -qx "jq"
+    rpm -qpR "$RPM" | grep -qx "tar"
+}
+
+@test "timer spreads the runs of nodes that boot together" {
+    grep -qx "RandomizedDelaySec=1min" "/usr/lib/systemd/system/$NAME.timer"
+}
+
 @test "package ships the expected files" {
     run rpm -qlp "$RPM"
     [ "$status" -eq 0 ]

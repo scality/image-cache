@@ -30,7 +30,8 @@ systemctl enable --now containerd-image-preload.timer
 Installing does not enable anything: the package ships the units and stops
 there, so the provisioning layer decides when they start. The timer fires once
 at boot (`OnBootSec=0`) and every ten minutes after each run
-(`OnUnitActiveSec=10min`). To import right away:
+(`OnUnitActiveSec=10min`), up to a minute late (`RandomizedDelaySec=1min`) so
+nodes that boot together drift apart. To import right away:
 
 ```console
 systemctl start containerd-image-preload.service
@@ -69,9 +70,14 @@ below it:
 
 Nothing deeper, and nothing under a hidden directory. Each file goes in with
 `ctr -n k8s.io images import --platform "$IMAGE_PLATFORM"`, into the `k8s.io`
-namespace, which is where the kubelet looks. Re-importing an image containerd
-already has replaces nothing and breaks nothing, which is what makes running
-the timer on a short period harmless.
+namespace, which is where the kubelet looks.
+
+An archive is skipped when every image in its OCI `index.json`
+(`io.containerd.image.name` and digest) is reported complete and unpacked by
+`ctr -n k8s.io images check`, which saves re-reading and re-writing it every
+run. Otherwise it is imported, including when the archive has no OCI index,
+an unnamed image or an index over 1 MiB, and when `ctr images check` fails.
+This needs `jq` and GNU `tar`, which the package requires.
 
 A tarball that fails to import does not stop the ones after it. The run tries
 every archive, names each one it could not import, and then exits non-zero, so
@@ -92,9 +98,9 @@ exits zero: deciding that an empty cache is wrong is the caller's call, not
 this script's. A pipeline that reads "wrote to stderr" as "failed" will see
 that line, so read the exit status.
 
-Every run ends with one line that says what it did. Under systemd, each line
-carries its syslog priority: failures are `err`, a cache with nothing left is
-`warning`, the rest is `info`. So `journalctl -u containerd-image-preload -p err`
+Every run ends with one line that says what it did. Under systemd, each line carries its syslog priority: failures are
+`err`, a cache with nothing left and a containerd that could not list its
+images are `warning`, the rest is `info`. So `journalctl -u containerd-image-preload -p err`
 shows only the failed imports. The journal adds the timestamps. Run by hand,
 the script prints plain lines with no priority prefix. Lines that `ctr` writes
 itself stay at `info`.

@@ -1,20 +1,14 @@
-name: agent-ci
+name: "Pre Merge"
 
 permissions:
   contents: read
 
 on:
-  # No path filter on pull requests: a required status check that never runs
-  # leaves the pull request waiting for it forever, so every pull request has
-  # to report this workflow, even the ones that touch neither `agent/` nor this
-  # file. Pushes to `main` keep the filter, where nothing waits on them.
+  workflow_dispatch:
+
   pull_request:
-    branches: [main]
-  push:
-    branches: [main]
-    paths:
-      - 'agent/**'
-      - '.github/workflows/agent-ci.yaml'
+    branches:
+      - main
 
 jobs:
   lint:
@@ -92,3 +86,23 @@ jobs:
           kubectl version --client
       - name: Run the e2e tests
         run: make -C agent test-e2e
+
+  rpm:
+    name: rpm (el${{ matrix.el }})
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        el: [8, 9]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+      - name: Run RPM package tests
+        env:
+          EL: ${{ matrix.el }}
+        run: make -C rpm test EL="$EL"

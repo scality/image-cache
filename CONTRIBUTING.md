@@ -35,7 +35,7 @@ The agent needs the Go version set in `agent/go.mod`. controller-gen,
 kustomize, envtest, golangci-lint and kind are downloaded into `agent/bin/` at
 pinned versions by the `Makefile`, so those need no manual install. `kubectl`
 does: the deploy and e2e targets expect it on your `PATH`. CI pins it in
-`.github/workflows/agent-ci.yaml`.
+`.github/workflows/pre-merge.yaml`.
 
 One version escapes the pinning. The `logcheck` plugin of the custom
 golangci-lint build resolves to `latest` in `agent/.custom-gcl.yml`, so a new
@@ -104,8 +104,8 @@ make -C rpm rpm EL=9        # build both RPMs into rpm/_build/
   an earlier commit of the same branch should be squashed into it.
 - Explain *why* in the body when the change is not obvious from the diff;
   reference an issue with a trailing `Refs: #<issue>` or `Fixes: #<issue>`.
-- Run the relevant `make` targets before opening the pull request. Both CI
-  workflows run on every pull request, and the code owners listed in
+- Run the relevant `make` targets before opening the pull request. The Pre
+  Merge workflow runs on every pull request. The code owners listed in
   [.github/CODEOWNERS](.github/CODEOWNERS) are requested for review.
 - Fill in the pull request template. Its sections are what a reviewer needs to
   read the change: which half it touches, the problem, the decisions, what you

@@ -1,5 +1,4 @@
-[![agent-ci](https://github.com/scality/image-cache/actions/workflows/agent-ci.yaml/badge.svg)](https://github.com/scality/image-cache/actions/workflows/agent-ci.yaml)
-[![rpm-ci](https://github.com/scality/image-cache/actions/workflows/rpm-ci.yaml/badge.svg)](https://github.com/scality/image-cache/actions/workflows/rpm-ci.yaml)
+[![Pre Merge](https://github.com/scality/image-cache/actions/workflows/pre-merge.yaml/badge.svg)](https://github.com/scality/image-cache/actions/workflows/pre-merge.yaml)
 [![Go version](https://img.shields.io/github/go-mod/go-version/scality/image-cache?filename=agent%2Fgo.mod)](agent/go.mod)
 [![License](https://img.shields.io/github/license/scality/image-cache)](LICENSE)
 
@@ -245,9 +244,8 @@ agent/   the Go module (kubebuilder): the agent, imagecachectl, the CRD and mani
 rpm/     the two packages: sources, specs, build and tests
 ```
 
-Each component is built and tested independently, and both CI workflows run on
-every pull request, since a required check that never runs leaves the pull
-request waiting forever; on pushes to `main` they are scoped by path.
+Each component is built and tested independently. The Pre Merge workflow tests
+both on every pull request that targets `main`.
 
 Releases are not independent yet: a tag cuts one version for the repository.
 It attaches the two RPMs, for both EL versions, and publishes the agent image

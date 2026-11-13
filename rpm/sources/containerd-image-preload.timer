@@ -4,6 +4,11 @@ Description=Periodically pre-load container images from the local cache into con
 [Timer]
 OnBootSec=0
 OnUnitActiveSec=10min
+# Nodes that boot together would otherwise stay in phase and hit a shared
+# datastore in the same second whenever they do have something to import.
+# Each run lands up to this much late, so they drift apart. It delays the
+# boot run as well: systemd 239, on EL8, has no way to spare one trigger.
+RandomizedDelaySec=1min
 
 [Install]
 WantedBy=timers.target

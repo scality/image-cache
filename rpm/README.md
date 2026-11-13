@@ -30,7 +30,10 @@ systemctl enable --now containerd-image-preload.timer
 Installing does not enable anything: the package ships the units and stops
 there, so the provisioning layer decides when they start. The timer fires once
 at boot (`OnBootSec=0`) and every ten minutes after each run
-(`OnUnitActiveSec=10min`). To import right away:
+(`OnUnitActiveSec=10min`), each time up to a minute late
+(`RandomizedDelaySec=1min`), so nodes that boot together drift apart instead of
+hitting shared storage in the same second. The boot run gets that delay too.
+To import right away:
 
 ```console
 systemctl start containerd-image-preload.service
@@ -69,9 +72,29 @@ below it:
 
 Nothing deeper, and nothing under a hidden directory. Each file goes in with
 `ctr -n k8s.io images import --platform "$IMAGE_PLATFORM"`, into the `k8s.io`
-namespace, which is where the kubelet looks. Re-importing an image containerd
-already has replaces nothing and breaks nothing, which is what makes running
-the timer on a short period harmless.
+namespace, which is where the kubelet looks.
+
+An archive whose images containerd already has is skipped. Re-importing it
+would replace nothing, but `ctr` would still read and write about twice the
+archive's size, every run. Before importing, the script reads the archive's
+OCI `index.json`, a few kilobytes even in a large archive, and compares each
+image's `io.containerd.image.name` and manifest digest with what
+`ctr -n k8s.io images check` reports as complete and unpacked. It asks
+containerd once per run. The archive is skipped only when every image in it
+matches. In any other case it is imported:
+
+- containerd lost the image (a prune, the kubelet's image garbage collection,
+  `ctr images rm`), or holds it incomplete or not unpacked;
+- the archive was replaced with one holding another digest;
+- the archive has no OCI `index.json` (a legacy `docker save` archive), names
+  an image without `io.containerd.image.name`, or has an index over 1 MiB;
+- `ctr images check` itself failed. The run then says so on stderr and
+  imports every archive.
+
+A hash of the archive would not do the job: the archive does not change when
+containerd loses the image, which is the case the timer is there for.
+
+The comparison needs `jq` and GNU `tar`, which the package requires.
 
 A tarball that fails to import does not stop the ones after it. The run tries
 every archive, names each one it could not import, and then exits non-zero, so
@@ -92,9 +115,11 @@ exits zero: deciding that an empty cache is wrong is the caller's call, not
 this script's. A pipeline that reads "wrote to stderr" as "failed" will see
 that line, so read the exit status.
 
-Every run ends with one line that says what it did. Under systemd, each line
-carries its syslog priority: failures are `err`, a cache with nothing left is
-`warning`, the rest is `info`. So `journalctl -u containerd-image-preload -p err`
+Every run ends with one line that says what it did: how many archives it
+imported, how many were already in containerd, and how many were no longer
+there. Under systemd, each line carries its syslog priority: failures are
+`err`, a cache with nothing left and a containerd that could not list its
+images are `warning`, the rest is `info`. So `journalctl -u containerd-image-preload -p err`
 shows only the failed imports. The journal adds the timestamps. Run by hand,
 the script prints plain lines with no priority prefix. Lines that `ctr` writes
 itself stay at `info`.

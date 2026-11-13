@@ -24,11 +24,16 @@ Restoring the cache and filling it are separate problems with separate
 lifetimes, so they are separate components:
 
 - **`containerd-image-preload`** (an RPM) answers *restore*. A systemd timer
-  runs `ctr images import` over every tarball of the cache directory, on boot
-  and periodically. It is deliberately dumb: a shell script, no daemon, no
-  Kubernetes client, no registry access. It works on a node whose cluster is
-  down, and it is idempotent: re-importing what containerd already has
-  replaces nothing and breaks nothing.
+  walks every tarball of the cache directory, on boot and periodically, and
+  runs `ctr images import` on those whose images containerd is missing. It is
+  deliberately dumb: a shell script, no daemon, no Kubernetes client, no
+  registry access. It works on a node whose cluster is down. A re-import of
+  what containerd already has replaces nothing, but it is not free: it reads
+  and writes about twice the archive's size. So the script compares each
+  archive's `index.json` (image names and manifest digests) with what
+  `ctr images check` reports complete and unpacked, and skips the archives
+  that match. That comparison reads a few kilobytes per archive, not the
+  archive itself.
 
 - **`image-cache-agent`** (a Kubernetes DaemonSet) answers *fill*. It watches
   `ImageCache` custom resources, pulls the images they point at, extracts the

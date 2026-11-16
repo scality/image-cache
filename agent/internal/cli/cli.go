@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	imgname "github.com/google/go-containerregistry/pkg/name"
 	"github.com/scality/go-errors"
 	"github.com/spf13/cobra"
 
@@ -80,7 +81,7 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 				return errors.New("--insecure-skip-tls-verify and --plain-http exclude each other")
 			}
 			err := do(cmd.Context(), cachePath, name, args[0],
-				puller.TLS{CAFile: caFile, SkipVerify: skipVerify, PlainHTTP: plainHTTP}, out, errOut)
+				puller.TLS{CAFile: caFile, SkipVerify: skipVerify}, plainHTTP, out, errOut)
 			// An interrupted run is not a failure to diagnose: the extraction
 			// publishes by rename, so nothing half written is left behind.
 			if errors.Is(err, context.Canceled) {
@@ -145,13 +146,14 @@ func validate(name, cachePath string) error {
 	return nil
 }
 
-func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out, errOut io.Writer) error {
+func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, plainHTTP bool,
+	out, errOut io.Writer) error {
 	store := cache.Store{}
 
 	// Before the cache state, so that a CA that cannot be used is reported
 	// on every run, including one that would have found the resource
 	// complete, rather than only on the run that finally needs the registry.
-	src, err := pullerFor(source, tls)
+	src, err := pullerFor(source, tls, plainHTTP)
 	if err != nil {
 		return err
 	}
@@ -159,7 +161,7 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out
 		if tls.SkipVerify {
 			printf(errOut, "imagecachectl: warning: the registry certificate is not verified\n")
 		}
-		if tls.PlainHTTP {
+		if plainHTTP {
 			printf(errOut, "imagecachectl: warning: the registry may be reached over plain HTTP\n")
 		}
 	}
@@ -216,14 +218,21 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, out
 // file rather than coming back with a complaint about a reference.
 //
 // The TLS and plain HTTP settings only matter to a registry, so an archive
-// never reads them.
-func pullerFor(source string, tls puller.TLS) (puller.Puller, error) {
+// never reads them. The command pulls one source per run, so plain HTTP is
+// allowed to that source's registry: the puller takes a list of registries,
+// and this one is the only entry.
+func pullerFor(source string, tls puller.TLS, plainHTTP bool) (puller.Puller, error) {
 	switch {
 	case strings.HasPrefix(source, string(os.PathSeparator)),
 		strings.HasPrefix(source, "."),
 		strings.HasSuffix(source, ".tar"):
 		return puller.Tarball{}, nil
 	default:
+		// A reference that does not parse is reported by the pull, which
+		// names it as one.
+		if ref, err := imgname.ParseReference(source); plainHTTP && err == nil {
+			tls.PlainHTTPRegistries = []string{ref.Context().RegistryStr()}
+		}
 		return puller.NewRemote(tls)
 	}
 }

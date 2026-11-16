@@ -310,15 +310,34 @@ Pulling and extraction use
   unusable one stops the agent at startup rather than failing every pull.
   `--insecure-skip-tls-verify` turns verification off for test clusters. It
   excludes `--ca-file`, so neither setting wins in silence.
-- On its own, the library uses plain HTTP only for a loopback or private IP
-  address, or a `localhost` host name.
-  `--plain-http` marks every registry insecure (`name.Insecure`). The client
-  then tries HTTPS first, and also HTTP when HTTPS fails or takes more than
-  300ms: the first answer wins, on every pull. So the flag also weakens a
-  registry that serves HTTPS: a certificate error no longer fails the pull,
-  and anyone on the path can answer the HTTP attempt (port 80 when the
-  reference names no port). It is for a registry without TLS, and excludes
-  both certificate flags rather than mixing the two modes.
+- On its own, the library also tries plain HTTP for a loopback or private IP
+  address, or a `localhost` host name, and nothing turns that off. The agent
+  hands it a transport that refuses any plain HTTP request to a registry that
+  is not listed, before the request leaves, so only the HTTPS attempt is left
+  to answer and a bad certificate fails the pull again. Without it, a registry
+  on a private address, the usual case on premises, would be reached over
+  plain HTTP whatever the list says. `imagecachectl import` goes through the
+  same transport: without `--plain-http` it refuses plain HTTP to such an
+  address too.
+  `--plain-http-registry` lists registries, as `host[:port]`, to mark
+  insecure (`name.Insecure`). For those, the client tries HTTPS first, and
+  also HTTP when HTTPS fails or takes more than 300ms: the first answer wins,
+  on every pull. So marking a registry also weakens it if it serves HTTPS: a
+  certificate error no longer fails the pull, and anyone on the path can
+  answer the HTTP attempt (port 80 when the reference names no port). That
+  is why the setting is a list and not a switch: a single global flag would
+  weaken every HTTPS registry the resources name to serve one plain HTTP
+  registry. Docker's `insecure-registries` and containerd's `hosts.toml`
+  scope it the same way.
+  An entry matches the registry of a parsed reference
+  (`Context().RegistryStr()`) exactly, after the same normalization, so
+  `docker.io` matches `index.docker.io`. There is no matching by resolved
+  address: a registry listed by IP and referenced by name, or listed without
+  its port, does not match. The list goes with `--ca-file`, which covers the
+  registries that serve TLS, and excludes `--insecure-skip-tls-verify`, meant
+  for test clusters only. `imagecachectl import` keeps a `--plain-http`
+  switch: it pulls one source per run, so the switch already covers that
+  source's registry alone.
 
 The cache images are regular container images (they must remain importable
 and mountable with `ctr` by provisioning tooling), so an artifact-oriented

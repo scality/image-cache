@@ -94,8 +94,9 @@ const (
 const cachePath = "/var/lib/image-cache"
 
 // registryNamespace holds the two registries the agent pulls from, one plain
-// HTTP and one TLS. Sources name them by their Service, a host name: without
-// --plain-http the agent only tries HTTPS, as it would for a real registry.
+// HTTP and one TLS. Sources name them by their Service, a host name: unless
+// --plain-http-registry lists it, the agent only tries HTTPS, as it would for
+// a real registry.
 const registryNamespace = "image-cache-e2e-registry"
 
 // registryVersion pins the registry by digest, as it is pulled from Docker Hub
@@ -323,9 +324,8 @@ spec:
 			deployRegistry("registry", "")
 			digest := pushCarrier("registry", nil)
 
-			By("restarting the agent with --plain-http")
-			patchAgent("--type=json",
-				`-p=[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--plain-http"}]`)
+			By("restarting the agent with the plain HTTP registry listed")
+			allowPlainHTTP("registry")
 
 			By("creating an ImageCache that selects the worker only")
 			worker, controlPlane := utils.WorkerNode(), utils.ControlPlaneNode()
@@ -431,9 +431,8 @@ spec:
 			adoptedInode := seedWithImagecachectl(bin, worker, adoptedName, carrierBody)
 			seedWithImagecachectl(bin, worker, replacedName, "another image")
 
-			By("restarting the agent with --plain-http")
-			patchAgent("--type=json",
-				`-p=[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--plain-http"}]`)
+			By("restarting the agent with the plain HTTP registry listed")
+			allowPlainHTTP("registry")
 
 			By("creating the two ImageCaches the seeded directories stand for")
 			applyImageCache(adoptedName, worker, "registry")
@@ -479,8 +478,8 @@ spec:
 })
 
 // patchAgent patches the agent DaemonSet, waits for the new pods, and rolls
-// the change back when the spec ends: --plain-http and --ca-file exclude each
-// other, so each spec starts from the shipped manifests.
+// the change back when the spec ends, so each spec starts from the shipped
+// manifests.
 func patchAgent(args ...string) {
 	cmd := exec.Command("kubectl", append([]string{"patch", "daemonset", daemonSetName, "-n", namespace}, args...)...)
 	_, err := utils.Run(cmd)
@@ -498,6 +497,14 @@ func patchAgent(args ...string) {
 		waitAgentRollout()
 	})
 	waitAgentRollout()
+}
+
+// allowPlainHTTP restarts the agent with the named in-cluster registry listed
+// in --plain-http-registry, written as applyImageCache's sources name it.
+func allowPlainHTTP(registry string) {
+	arg := fmt.Sprintf("--plain-http-registry=%s.%s.svc.cluster.local:5000", registry, registryNamespace)
+	patchAgent("--type=json",
+		`-p=[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"`+arg+`"}]`)
 }
 
 func waitAgentRollout() {

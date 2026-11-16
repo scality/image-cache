@@ -66,7 +66,7 @@ func TestRemotePullStreamsTheImageFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rc, digest, err := Remote{}.Pull(context.Background(), ref)
+	rc, digest, err := listing(t, ref).Pull(context.Background(), ref)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestRemotePullResolvesMultiArchIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rc, digest, err := Remote{}.Pull(context.Background(), ref)
+	rc, digest, err := listing(t, ref).Pull(context.Background(), ref)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestRemotePullNoMatchingPlatform(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := (Remote{}).Pull(context.Background(), ref); err == nil {
+	if _, _, err := listing(t, ref).Pull(context.Background(), ref); err == nil {
 		t.Fatal("want error when the index has no linux/amd64 child")
 	}
 }
@@ -246,7 +246,7 @@ func TestRemotePullRefusesASingleManifestOfAnotherPlatform(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err = (Remote{}).Pull(context.Background(), ref)
+	_, _, err = listing(t, ref).Pull(context.Background(), ref)
 	if !errors.Is(err, ErrPull) {
 		t.Fatalf("Pull: err = %v, want ErrPull", err)
 	}
@@ -254,7 +254,7 @@ func TestRemotePullRefusesASingleManifestOfAnotherPlatform(t *testing.T) {
 		t.Errorf("err = %v, want both architectures named", err)
 	}
 	// Adoption resolves the source without pulling it.
-	if _, err := (Remote{}).Resolve(context.Background(), ref); !errors.Is(err, ErrPull) {
+	if _, err := listing(t, ref).Resolve(context.Background(), ref); !errors.Is(err, ErrPull) {
 		t.Errorf("Resolve: err = %v, want ErrPull", err)
 	}
 }
@@ -274,7 +274,7 @@ func TestRemotePullContextCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := (Remote{}).Pull(ctx, ref); err == nil {
+	if _, _, err := listing(t, ref).Pull(ctx, ref); err == nil {
 		t.Fatal("want error on an already-cancelled context")
 	}
 }
@@ -630,7 +630,7 @@ func TestRemotePullRefusesALayerAlteredInTransit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ref := servedTampered(t, img, layerDigest.String(), tc.tamper)
-			rc, _, err := (Remote{}).Pull(t.Context(), ref)
+			rc, _, err := listing(t, ref).Pull(t.Context(), ref)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1026,7 +1026,7 @@ func TestBothPullersAgreeOnTheLayers(t *testing.T) {
 	}
 
 	for via, resolve := range map[string]func() (Image, error){
-		"registry": func() (Image, error) { return Remote{}.Resolve(t.Context(), ref) },
+		"registry": func() (Image, error) { return listing(t, ref).Resolve(t.Context(), ref) },
 		"archive":  func() (Image, error) { return Tarball{}.Resolve(t.Context(), path) },
 	} {
 		id, err := resolve()
@@ -1067,7 +1067,7 @@ func TestRemoteResolveReadsNoLayer(t *testing.T) {
 		return b
 	})
 
-	id, err := Remote{}.Resolve(t.Context(), ref)
+	id, err := listing(t, ref).Resolve(t.Context(), ref)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1279,6 +1279,51 @@ func plainRegistry(t *testing.T) (ref string, base *http.Transport) {
 	return "example.com:" + port + workerRefPath, base
 }
 
+// plainHost is a registry entry for the tests that only build a Remote.
+const plainHost = "registry.local:5000"
+
+// registryOf returns the registry a reference names, as the list matches it.
+func registryOf(t *testing.T, ref string) string {
+	t.Helper()
+	parsed, err := name.ParseReference(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed.Context().RegistryStr()
+}
+
+// listing returns a Remote that may reach the registry ref names over plain
+// HTTP. httptest.NewServer serves plain HTTP on a loopback address, which is
+// HTTPS only like any other registry that is not listed.
+func listing(t *testing.T, ref string) Remote {
+	t.Helper()
+	return Remote{plainHTTP: []string{registryOf(t, ref)}}
+}
+
+// loopbackTransport reaches any test server by the port its address carries:
+// both registries are named example.com, and only their ports tell them apart.
+func loopbackTransport(caFile string, t *testing.T) *http.Transport {
+	t.Helper()
+	base := remote.DefaultTransport.(*http.Transport).Clone()
+	base.Proxy = nil
+	dialer := &net.Dialer{}
+	base.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		return dialer.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
+	}
+	if caFile != "" {
+		pool, err := caPool(caFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		base.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	}
+	return base
+}
+
 func TestRemotePullNeedsPlainHTTPForARegistryWithoutTLS(t *testing.T) {
 	ref, base := plainRegistry(t)
 
@@ -1291,7 +1336,7 @@ func TestRemotePullNeedsPlainHTTPForARegistryWithoutTLS(t *testing.T) {
 		t.Errorf("err = %v, want an HTTPS request refused", err)
 	}
 
-	rc, _, err := Remote{transport: base, plainHTTP: true}.Pull(context.Background(), ref)
+	rc, _, err := Remote{transport: base, plainHTTP: []string{registryOf(t, ref)}}.Pull(context.Background(), ref)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1304,17 +1349,79 @@ func TestRemotePullNeedsPlainHTTPForARegistryWithoutTLS(t *testing.T) {
 	}
 }
 
-// A registry that serves HTTPS stays reachable with plain HTTP allowed. The
-// test server only speaks TLS, so a pull that succeeds went over HTTPS.
-func TestRemotePullWithPlainHTTPStillReachesAnHTTPSRegistry(t *testing.T) {
-	ref, caFile, base := tlsRegistry(t)
-	pool, err := caPool(caFile)
+// Only a listed registry is reached over plain HTTP. Another one, the same
+// host on another port or listed without its port, is still asked over HTTPS.
+func TestRemotePullReachesAnUnlistedRegistryOverHTTPSOnly(t *testing.T) {
+	ref, base := plainRegistry(t)
+	for label, listed := range map[string][]string{
+		"another port": {"example.com:1"},
+		"no port":      {"example.com"},
+		"by IP":        {"127.0.0.1:" + strings.Split(registryOf(t, ref), ":")[1]},
+	} {
+		t.Run(label, func(t *testing.T) {
+			_, _, err := Remote{transport: base, plainHTTP: listed}.Pull(context.Background(), ref)
+			if !errors.Is(err, ErrPull) || !strings.Contains(err.Error(), "HTTP response to HTTPS client") {
+				t.Fatalf("err = %v, want an HTTPS request refused", err)
+			}
+		})
+	}
+}
+
+// On its own, the library also races plain HTTP for a private or loopback IP
+// address and for a localhost name, listed or not. The registry here only
+// speaks plain HTTP and counts the requests that reach it: unlisted, none may,
+// and the pull fails; listed, the same pull succeeds, which shows every name
+// was routed to it all along.
+func TestRemotePullNeverReachesAnUnlistedLocalRegistryOverHTTP(t *testing.T) {
+	var reached atomic.Int32
+	reg := registry.New()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+		reg.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	base.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	host := strings.TrimPrefix(srv.URL, "http://")
+	if err := crane.Push(img, host+workerRefPath); err != nil {
+		t.Fatal(err)
+	}
+	_, port, _ := net.SplitHostPort(host)
+	base := loopbackTransport("", t)
 
-	rc, _, err := Remote{transport: base, plainHTTP: true}.Pull(context.Background(), ref)
+	for _, h := range []string{"10.0.0.1", "172.16.0.1", "192.168.0.1", "127.0.0.1", "registry.localhost"} {
+		t.Run(h, func(t *testing.T) {
+			ref := net.JoinHostPort(h, port) + workerRefPath
+
+			reached.Store(0)
+			_, _, err := Remote{transport: base}.Pull(t.Context(), ref)
+			if !errors.Is(err, ErrPull) || !strings.Contains(err.Error(), ErrUnlistedPlainHTTP.Error()) {
+				t.Fatalf("err = %v, want the plain HTTP attempt refused", err)
+			}
+			if n := reached.Load(); n != 0 {
+				t.Errorf("%d plain HTTP requests reached an unlisted registry", n)
+			}
+
+			rc, _, err := Remote{transport: base, plainHTTP: []string{registryOf(t, ref)}}.Pull(t.Context(), ref)
+			if err != nil {
+				t.Fatalf("listed: %v", err)
+			}
+			if _, err := readAll(t, rc); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A listed registry that serves HTTPS stays reachable. The test server only
+// speaks TLS, so a pull that succeeds went over HTTPS.
+func TestRemotePullWithPlainHTTPStillReachesAnHTTPSRegistry(t *testing.T) {
+	ref, caFile, _ := tlsRegistry(t)
+
+	r := Remote{transport: loopbackTransport(caFile, t), plainHTTP: []string{registryOf(t, ref)}}
+	rc, _, err := r.Pull(context.Background(), ref)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1323,25 +1430,87 @@ func TestRemotePullWithPlainHTTPStillReachesAnHTTPSRegistry(t *testing.T) {
 	}
 }
 
-func TestNewRemoteWithPlainHTTPKeepsTheDefaultTransport(t *testing.T) {
-	r, err := NewRemote(TLS{PlainHTTP: true})
+// The case the global flag could not serve: a plain HTTP registry and one
+// signed by a private CA, in the same run. Listing the first one leaves the
+// second one checked, so it still fails on a certificate it cannot verify.
+func TestRemotePullsFromAListedPlainRegistryAndAnHTTPSOne(t *testing.T) {
+	plainRef, _ := plainRegistry(t)
+	tlsRef, caFile, _ := tlsRegistry(t)
+	cfg := TLS{CAFile: caFile, PlainHTTPRegistries: []string{registryOf(t, plainRef)}}
+
+	r, err := newRemote(cfg, loopbackTransport("", t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.transport != nil || !r.plainHTTP {
-		t.Errorf("remote = %+v, want the library default transport and plain HTTP", r)
+	for _, ref := range []string{plainRef, tlsRef} {
+		rc, _, err := r.Pull(context.Background(), ref)
+		if err != nil {
+			t.Fatalf("pulling %s: %v", ref, err)
+		}
+		if _, err := readAll(t, rc); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Without the CA, the system pool does not know the test certificate.
+	// httptest signs every server with the same one, so a second CA file
+	// would not tell anything apart.
+	r = Remote{transport: loopbackTransport("", t), plainHTTP: r.plainHTTP}
+	_, _, err = r.Pull(context.Background(), tlsRef)
+	if _, ok := errors.AsType[x509.UnknownAuthorityError](err); !ok {
+		t.Errorf("err = %v, want an unknown authority", err)
 	}
 }
 
-func TestNewRemoteRefusesPlainHTTPWithACertificateSetting(t *testing.T) {
-	for label, cfg := range map[string]TLS{
-		"CA file":     {PlainHTTP: true, CAFile: "ca.crt"},
-		"skip verify": {PlainHTTP: true, SkipVerify: true},
-	} {
-		t.Run(label, func(t *testing.T) {
-			if _, err := NewRemote(cfg); !errors.Is(err, ErrTLS) {
-				t.Fatalf("err = %v, want ErrTLS", err)
+func TestNewRemoteWithPlainHTTPKeepsTheDefaultTransport(t *testing.T) {
+	r, err := NewRemote(TLS{PlainHTTPRegistries: []string{plainHost}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.transport != nil || !slices.Equal(r.plainHTTP, []string{plainHost}) {
+		t.Errorf("remote = %+v, want the library default transport and the registry listed", r)
+	}
+}
+
+// docker.io is index.docker.io once a reference is parsed: the entry must
+// match what the reference names, so it is normalized the same way.
+func TestNewRemoteNormalizesThePlainHTTPRegistries(t *testing.T) {
+	r, err := NewRemote(TLS{PlainHTTPRegistries: []string{"docker.io", "10.0.0.1:5000", "docker.io"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{registryOf(t, "nginx"), "10.0.0.1:5000"}
+	if !slices.Equal(r.plainHTTP, want) {
+		t.Errorf("plain HTTP registries = %v, want %v", r.plainHTTP, want)
+	}
+}
+
+func TestNewRemoteRefusesAPlainHTTPRegistryThatIsNotAHost(t *testing.T) {
+	for _, entry := range []string{"", "http://registry.local", "registry.local/repo"} {
+		t.Run(entry, func(t *testing.T) {
+			_, err := NewRemote(TLS{PlainHTTPRegistries: []string{entry}})
+			if !errors.Is(err, ErrPlainHTTPRegistry) {
+				t.Fatalf("err = %v, want ErrPlainHTTPRegistry", err)
 			}
 		})
+	}
+}
+
+func TestNewRemoteTakesPlainHTTPRegistriesWithACAFile(t *testing.T) {
+	_, caFile, _ := tlsRegistry(t)
+
+	r, err := NewRemote(TLS{CAFile: caFile, PlainHTTPRegistries: []string{plainHost}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.transport == nil || len(r.plainHTTP) != 1 {
+		t.Errorf("remote = %+v, want the CA transport and the registry listed", r)
+	}
+}
+
+func TestNewRemoteRefusesPlainHTTPRegistriesWithSkipVerify(t *testing.T) {
+	_, err := NewRemote(TLS{SkipVerify: true, PlainHTTPRegistries: []string{plainHost}})
+	if !errors.Is(err, ErrTLS) {
+		t.Fatalf("err = %v, want ErrTLS", err)
 	}
 }

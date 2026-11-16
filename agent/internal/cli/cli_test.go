@@ -23,6 +23,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/scality/image-cache/agent/internal/cache"
+	"github.com/scality/image-cache/agent/internal/puller"
 )
 
 const (
@@ -49,7 +50,9 @@ func archive(t *testing.T, files map[string][]byte) string {
 	return path
 }
 
-// served pushes the same shape to an in-memory registry and returns its reference.
+// served pushes the same shape to an in-memory registry and returns its
+// reference. The registry serves plain HTTP on a loopback address, which the
+// command reaches with --plain-http only, as it would any other registry.
 func served(t *testing.T, files map[string][]byte) string {
 	t.Helper()
 	srv := httptest.NewServer(registry.New())
@@ -96,7 +99,7 @@ func TestImportFromARegistry(t *testing.T) {
 	cacheDir := t.TempDir()
 	ref := served(t, map[string][]byte{pauseTarPath: []byte("pause")})
 
-	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, ref)
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, "--plain-http", ref)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
 	}
@@ -282,7 +285,7 @@ func TestASourceShapedLikeAReferenceIsNotReadFromDisk(t *testing.T) {
 	}
 	t.Chdir(cwd)
 
-	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, ref)
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, "--plain-http", ref)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
 	}
@@ -587,7 +590,7 @@ func TestImportFailsWhenALayerCannotBeFetched(t *testing.T) {
 	t.Cleanup(cutting.Close)
 	cacheDir := t.TempDir()
 
-	code, out, _ := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir,
+	code, out, _ := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, "--plain-http",
 		strings.TrimPrefix(cutting.URL, "http://")+"/boot-cache/worker:1.0.0")
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 (stdout %q)", code, out)
@@ -632,7 +635,17 @@ func TestCAFileIsNotReadForAnArchive(t *testing.T) {
 
 func TestSkippingTLSVerificationIsAnnounced(t *testing.T) {
 	cacheDir := t.TempDir()
-	ref := served(t, map[string][]byte{pauseTarPath: []byte("pause")})
+	// A certificate nothing trusts: only skipping the verification reaches it.
+	srv := httptest.NewTLSServer(registry.New())
+	t.Cleanup(srv.Close)
+	img, err := crane.Image(map[string][]byte{pauseTarPath: []byte("pause")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := strings.TrimPrefix(srv.URL, "https://") + "/boot-cache/worker:1.0.0"
+	if err := crane.Push(img, ref, crane.WithTransport(srv.Client().Transport)); err != nil {
+		t.Fatal(err)
+	}
 
 	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir,
 		"--insecure-skip-tls-verify", ref)
@@ -698,7 +711,9 @@ func TestImportRecordsTheSameImageWhateverTheSource(t *testing.T) {
 	layers := make([][]string, 0, len(sources))
 	for _, src := range sources {
 		cacheDir := t.TempDir()
-		if code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir, src); code != 0 {
+		// An archive reaches no registry, so --plain-http changes nothing for it.
+		if code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", cacheDir,
+			"--plain-http", src); code != 0 {
 			t.Fatalf("%s: exit = %d (%s)", src, code, errOut)
 		}
 		r := readSentinel(t, cacheDir)
@@ -720,8 +735,8 @@ func TestImportRecordsTheSameImageWhateverTheSource(t *testing.T) {
 
 // servedByName is served, but the reference names example.com and the
 // library default transport sends every address to the server for the rest
-// of the test. go-containerregistry already uses plain HTTP for a loopback
-// registry, so only a host name shows what --plain-http changes.
+// of the test. A host name is the plain case: the library tries nothing but
+// HTTPS for it, so the refusal comes from the registry alone.
 func servedByName(t *testing.T, files map[string][]byte) string {
 	t.Helper()
 	ref := served(t, files)
@@ -767,6 +782,20 @@ func TestPlainHTTPReachesARegistryWithoutTLS(t *testing.T) {
 	}
 	if string(got) != "pause" {
 		t.Errorf("pause.tar = %q, want %q", got, "pause")
+	}
+}
+
+// The library would race plain HTTP for a loopback registry on its own. The
+// command still refuses it without --plain-http, as it would a host name.
+func TestPlainHTTPIsNeededForALoopbackRegistry(t *testing.T) {
+	ref := served(t, map[string][]byte{pauseTarPath: []byte("pause")})
+
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, "--cache-path", t.TempDir(), ref)
+	if code != 1 {
+		t.Fatalf("exit = %d without --plain-http, want 1 (%s)", code, errOut)
+	}
+	if !strings.Contains(errOut, puller.ErrUnlistedPlainHTTP.Error()) {
+		t.Errorf("stderr = %s, want the plain HTTP attempt refused", errOut)
 	}
 }
 

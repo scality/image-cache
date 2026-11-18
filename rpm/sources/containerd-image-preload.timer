@@ -4,8 +4,6 @@ Description=Periodically pre-load container images from the local cache into con
 [Timer]
 OnBootSec=0
 OnUnitActiveSec=10min
-# Spread nodes that boot together. Also delays the boot run (systemd 239).
-RandomizedDelaySec=1min
 
 [Install]
 WantedBy=timers.target

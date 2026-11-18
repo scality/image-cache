@@ -30,8 +30,7 @@ systemctl enable --now containerd-image-preload.timer
 Installing does not enable anything: the package ships the units and stops
 there, so the provisioning layer decides when they start. The timer fires once
 at boot (`OnBootSec=0`) and every ten minutes after each run
-(`OnUnitActiveSec=10min`), up to a minute late (`RandomizedDelaySec=1min`) so
-nodes that boot together drift apart. To import right away:
+(`OnUnitActiveSec=10min`). To import right away:
 
 ```console
 systemctl start containerd-image-preload.service

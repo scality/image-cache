@@ -28,7 +28,7 @@ lifetimes, so they are separate components:
   images containerd is missing, on boot and periodically. It is deliberately
   dumb: a shell script, no daemon, no Kubernetes client, no registry access.
   It works on a node whose cluster is down. Archives whose `index.json` names
-  and digests all show as complete in `ctr images check` are skipped, since
+  and digests all show as complete and unpacked in `ctr images check` are skipped, since
   re-importing them costs about twice their size in I/O.
 
 - **`image-cache-agent`** (a Kubernetes DaemonSet) answers *fill*. It watches

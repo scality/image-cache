@@ -22,6 +22,7 @@ setup() {
     CTR_IMAGES="$TMP/ctr.images"
     CTR_CHECK_LOG="$TMP/ctr.check.log"
     CTR_CHECK_FAIL="$TMP/ctr.check.fail"
+    CTR_CHECK_PARTIAL="$TMP/ctr.check.partial"
     mkdir -p "$CACHE" "$BIN"
     : > "$CTR_LOG"
     : > "$CTR_FAIL"
@@ -43,6 +44,12 @@ if [ "\$3 \$4" = "images check" ]; then
     fi
     printf 'REF\tTYPE\tDIGEST\tSTATUS\tSIZE\tUNPACKED\n'
     cat "$CTR_IMAGES"
+    # Like the real ctr: every row printed, then a non-zero exit when one
+    # image could not be checked.
+    if [ -e "$CTR_CHECK_PARTIAL" ]; then
+        echo "ctr: unable to check registry.example/broken:1" >&2
+        exit 1
+    fi
     exit 0
 fi
 echo "\$*" >> "$CTR_LOG"
@@ -450,6 +457,21 @@ run_preload_on_journal() {
     [ "$status" -eq 0 ]
     grep -q "etcd.tar" "$CTR_LOG"
     [[ "$stderr" == *"Could not list the images containerd has, importing every archive"* ]]
+}
+
+@test "one image containerd cannot check does not stop the others from being skipped" {
+    make_archive "$CACHE/etcd.tar" registry.example/etcd:3.5 "$(digest 1)"
+    make_archive "$CACHE/broken.tar" registry.example/broken:1 "$(digest 2)"
+    containerd_has registry.example/etcd:3.5 "$(digest 1)"
+    containerd_has registry.example/broken:1 "$(digest 2)" "unavailable (1/?)" false
+    : > "$CTR_CHECK_PARTIAL"
+    run_preload
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Skipping $CACHE/etcd.tar, already in containerd"* ]]
+    [[ "$stderr" != *"Could not list the images containerd has"* ]]
+    # The image that failed its check is not taken as present.
+    grep -q "broken.tar" "$CTR_LOG"
+    run ! grep -q "etcd.tar" "$CTR_LOG"
 }
 
 @test "a run where everything is already in containerd is no warning" {

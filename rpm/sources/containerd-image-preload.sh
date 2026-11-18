@@ -35,9 +35,14 @@ INDEX_MAX_BYTES=1048576
 
 # "name digest" of each image containerd holds complete and unpacked.
 # STATUS and SIZE contain spaces, so UNPACKED is read as the last field.
+# ctr exits non-zero as soon as one image of the namespace cannot be checked,
+# any image, not only cached ones, yet still prints every row. So its exit
+# code is ignored: only a table with no header means containerd did not answer.
 ready_images() {
-    ctr -n k8s.io images check |
-        awk 'NR > 1 && $4 == "complete" && $NF == "true" { print $1, $3 }'
+    local table
+    table="$(ctr -n k8s.io images check 2> /dev/null)" || true
+    [[ "${table}" == REF* ]] || return 1
+    awk 'NR > 1 && $4 == "complete" && $NF == "true" { print $1, $3 }' <<< "${table}"
 }
 
 # "name digest" of each image in the archive's index.json. Fails when there
@@ -71,7 +76,7 @@ skipped=0
 current=0
 failures=0
 
-# If containerd cannot list its images, every archive is imported.
+# If containerd does not answer at all, every archive is imported.
 ready=""
 if [ "${scanned}" -ne 0 ] && ! ready="$(ready_images)"; then
     warn "Could not list the images containerd has, importing every archive"

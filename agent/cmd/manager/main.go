@@ -21,6 +21,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -59,6 +60,18 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// stringList is a flag that can be repeated, each occurrence adding a value.
+type stringList []string
+
+// String implements flag.Value.
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+// Set implements flag.Value.
+func (l *stringList) Set(v string) error {
+	*l = append(*l, v)
+	return nil
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -70,7 +83,8 @@ func main() {
 	var resyncPeriod time.Duration
 	var cachePath string
 	var caFile string
-	var skipVerify, plainHTTP bool
+	var skipVerify bool
+	var plainHTTPRegistries stringList
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -100,9 +114,10 @@ func main() {
 			"Read once at startup: restart the agent after rotating it.")
 	flag.BoolVar(&skipVerify, "insecure-skip-tls-verify", false,
 		"Accept any registry certificate. For a test cluster set up by hand only.")
-	flag.BoolVar(&plainHTTP, "plain-http", false,
-		"Allow plain HTTP to every registry. For a registry without TLS. "+
-			"Excludes --ca-file and --insecure-skip-tls-verify.")
+	flag.Var(&plainHTTPRegistries, "plain-http-registry",
+		"A registry, as host[:port], the agent may reach over plain HTTP. Repeat it for several. "+
+			"It must be written as the sources name it: by IP or by name, with the port they carry. "+
+			"Any other registry is reached over HTTPS only. Excludes --insecure-skip-tls-verify.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -210,7 +225,9 @@ func main() {
 
 	// Checked before anything starts: an unusable CA would otherwise surface
 	// as a failed pull on every node and every resource.
-	remote, err := puller.NewRemote(puller.TLS{CAFile: caFile, SkipVerify: skipVerify, PlainHTTP: plainHTTP})
+	remote, err := puller.NewRemote(puller.TLS{
+		CAFile: caFile, SkipVerify: skipVerify, PlainHTTPRegistries: plainHTTPRegistries,
+	})
 	if err != nil {
 		setupLog.Error(err, "unable to set up registry TLS")
 		os.Exit(1)
@@ -218,8 +235,11 @@ func main() {
 	if skipVerify {
 		setupLog.Info("WARNING: registry certificates are not verified (--insecure-skip-tls-verify)")
 	}
-	if plainHTTP {
-		setupLog.Info("WARNING: registries may be reached over plain HTTP (--plain-http)")
+	if len(plainHTTPRegistries) > 0 {
+		// Logged in full: an entry that does not match a source exactly
+		// shows up as "HTTP response to HTTPS client" on the pull.
+		setupLog.Info("WARNING: these registries may be reached over plain HTTP (--plain-http-registry)",
+			"registries", []string(plainHTTPRegistries))
 	}
 
 	fw, err := controller.NewFSWatcher(nodeName)

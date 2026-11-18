@@ -12,6 +12,8 @@ Source3:        containerd-image-preload.sysconfig
 
 BuildArch:      noarch
 Requires:       containerd
+Requires:       jq
+Requires:       tar
 
 %description
 A systemd service and timer that periodically import container image tarballs

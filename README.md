@@ -18,7 +18,7 @@ The project is three pieces that meet on a directory:
 
 | Component | What it does |
 | --- | --- |
-| [`containerd-image-preload`](rpm/) (RPM) | A systemd service and timer that import every tarball of the cache directory into containerd. Runs on boot and every 10 minutes. Needs no Kubernetes, no registry, no network. |
+| [`containerd-image-preload`](rpm/) (RPM) | A systemd service and timer that import into containerd the tarballs of the cache directory whose images containerd is missing. Runs on boot and every 10 minutes. Needs no Kubernetes, no registry, no network. |
 | [`image-cache-agent`](agent/) (DaemonSet) | A Kubernetes agent that fills the cache: it pulls the images declared by `ImageCache` custom resources, extracts the tarballs they carry into the cache directory, garbage-collects what is no longer declared, and reports per-node progress as node labels. |
 | [`imagecachectl`](agent/cmd/imagecachectl/) (command, RPM) | The same fill, once, for a node that has no Kubernetes yet. Reads a registry or a docker archive and writes the tarballs where the agent would have. |
 
@@ -44,7 +44,7 @@ cache up to date on a cluster that imports it some other way.
                      │ reads *.tar
                      ▼
   ┌──────────────────────────────────────┐
-  │  containerd-image-preload (systemd)  │   ctr images import, every 10 min
+  │  containerd-image-preload (systemd)  │   ctr images import of what is missing, every 10 min
   └──────────────────┬───────────────────┘
                      ▼
                  containerd

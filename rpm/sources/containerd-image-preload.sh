@@ -30,8 +30,9 @@ info() { log 6 1 "$@"; }
 warn() { log 4 2 "$@"; }
 error() { log 3 2 "$@"; }
 
-# Larger index.json files are not trusted; the archive is imported.
-INDEX_MAX_BYTES=1048576
+# Larger index.json, manifest.json or image configurations are not trusted;
+# the archive is imported.
+MEMBER_MAX_BYTES=1048576
 
 # "name digest" of each image containerd holds complete and unpacked.
 # STATUS and SIZE contain spaces, so UNPACKED is read as the last field.
@@ -45,11 +46,18 @@ ready_images() {
     awk 'NR > 1 && $4 == "complete" && $NF == "true" { print $1, $3 }' <<< "${table}"
 }
 
-# "name digest" of each image in the archive's index.json. Fails when there
-# is no index, an image is unnamed, or the index is too large.
-archive_images() {
-    tar --seek --occurrence=1 -xOf "$1" index.json 2> /dev/null |
-        head -c "${INDEX_MAX_BYTES}" |
+# One file at the root of an archive, cut at MEMBER_MAX_BYTES. Fails when
+# the archive does not hold it. A file cut short fails whatever reads it: it
+# is no longer valid JSON, and it no longer hashes to its digest.
+archive_member() {
+    tar --seek --occurrence=1 -xOf "$1" "$2" 2> /dev/null |
+        head -c "${MEMBER_MAX_BYTES}"
+}
+
+# "name digest" of each image in an OCI archive's index.json, the manifest
+# digest that containerd keeps as is. Fails when an image is unnamed.
+oci_archive_images() {
+    archive_member "$1" index.json |
         jq -r '
             .manifests
             | if length > 0
@@ -59,15 +67,101 @@ archive_images() {
         ' 2> /dev/null
 }
 
-# True when containerd already holds every image of the archive.
+# The name containerd gives a docker-archive tag on import: docker.io and
+# library/ added to a short name, latest to an untagged one.
+normalize_name() {
+    local name="$1" domain path
+    domain="${name%%/*}"
+    path="${name#*/}"
+    # As in Docker, a first component is a registry only when it looks like
+    # a host: a dot, a port, localhost, or an upper case letter, which a
+    # repository cannot have.
+    if [[ "${name}" != */* ]] ||
+        [[ "${domain}" != *[.:[:upper:]]* && "${domain}" != localhost ]]; then
+        domain=docker.io
+        path="${name}"
+    fi
+    if [ "${domain}" = index.docker.io ]; then
+        domain=docker.io
+    fi
+    if [ "${domain}" = docker.io ] && [[ "${path}" != */* ]]; then
+        path="library/${path}"
+    fi
+    if [[ "${path##*/}" != *:* ]]; then
+        path="${path}:latest"
+    fi
+    printf '%s/%s\n' "${domain}" "${path}"
+}
+
+# "name digest" of each tag in a docker-archive's manifest.json, with the
+# digest of the image configuration. containerd writes a manifest of its own
+# on import, so the configuration, copied byte for byte, is what the archive
+# and containerd have in common. Its digest is the hash of the file, not its
+# name. Fails when an image has no tag.
+docker_archive_images() {
+    local entries name config sum
+    local -A config_digests=()
+    entries="$(archive_member "$1" manifest.json |
+        jq -r '
+            if type == "array" and length > 0
+               and all(.[]; (.Config | type) == "string"
+                            and ((.RepoTags // []) | length) > 0)
+            then .[] | .Config as $config | .RepoTags[] | "\(.) \($config)"
+            else error("not every image is tagged") end
+        ' 2> /dev/null)" || return 1
+    while read -r name config; do
+        if [ -z "${config_digests[${config}]+set}" ]; then
+            sum="$(archive_member "$1" "${config}" | sha256sum)" || return 1
+            config_digests[${config}]="sha256:${sum%% *}"
+        fi
+        printf '%s %s\n' "$(normalize_name "${name}")" "${config_digests[${config}]}"
+    done <<< "${entries}"
+}
+
+# Configuration digest of each manifest looked up so far, empty when it could
+# not be read. Kept across archives, so an image is read once per run.
+declare -A ready_configs=()
+
+# Sets config to the configuration digest of the image containerd holds
+# ready under the name $1. Fails when it holds none, or when the name points
+# at an index rather than at a single manifest.
+ready_config() {
+    local manifest
+    manifest="$(name="$1" awk '$1 == ENVIRON["name"] { print $2; exit }' <<< "${ready}")"
+    [ -n "${manifest}" ] || return 1
+    if [ -z "${ready_configs[${manifest}]+set}" ]; then
+        ready_configs[${manifest}]="$(ctr -n k8s.io content get "${manifest}" 2> /dev/null |
+            head -c "${MEMBER_MAX_BYTES}" |
+            jq -er '.config.digest | strings' 2> /dev/null)" ||
+            ready_configs[${manifest}]=""
+    fi
+    config="${ready_configs[${manifest}]}"
+    [ -n "${config}" ]
+}
+
+# True when containerd already holds every image of the archive. Like
+# containerd, it reads an archive with an index.json as OCI, even when it also
+# has the manifest.json that Docker 25 and later write next to it.
 already_imported() {
-    local images line
+    local members images line name digest config
     [ -n "${ready}" ] || return 1
-    images="$(archive_images "$1")" || return 1
-    [ -n "${images}" ] || return 1
-    while IFS= read -r line; do
-        grep -qxF -- "${line}" <<< "${ready}" || return 1
-    done <<< "${images}"
+    members="$(tar --seek -tf "$1" 2> /dev/null)" || return 1
+    if grep -qxF index.json <<< "${members}"; then
+        images="$(oci_archive_images "$1")" || return 1
+        [ -n "${images}" ] || return 1
+        while IFS= read -r line; do
+            grep -qxF -- "${line}" <<< "${ready}" || return 1
+        done <<< "${images}"
+    elif grep -qxF manifest.json <<< "${members}"; then
+        images="$(docker_archive_images "$1")" || return 1
+        [ -n "${images}" ] || return 1
+        while read -r name digest; do
+            ready_config "${name}" || return 1
+            [ "${config}" = "${digest}" ] || return 1
+        done <<< "${images}"
+    else
+        return 1
+    fi
 }
 
 archives=("${IMAGE_CACHE_DIR}"/*.tar "${IMAGE_CACHE_DIR}"/*/*.tar)

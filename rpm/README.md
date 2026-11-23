@@ -71,12 +71,28 @@ Nothing deeper, and nothing under a hidden directory. Each file goes in with
 `ctr -n k8s.io images import --platform "$IMAGE_PLATFORM"`, into the `k8s.io`
 namespace, which is where the kubelet looks.
 
-An archive is skipped when every image in its OCI `index.json`
-(`io.containerd.image.name` and digest) is reported complete and unpacked by
-`ctr -n k8s.io images check`, which saves re-reading and re-writing it every
-run. Otherwise it is imported, including when the archive has no OCI index,
-an unnamed image or an index over 1 MiB, and when `ctr images check` fails.
-This needs `jq` and GNU `tar`, which the package requires.
+An archive is skipped when containerd already holds every image in it,
+complete and unpacked as `ctr -n k8s.io images check` reports, which saves
+re-reading and re-writing it every run. How an image is matched depends on
+the archive's format, read the way containerd reads it:
+
+- **OCI archive** (an `index.json`, as `docker save` writes from Docker 25 on,
+  even next to a `manifest.json`): its `io.containerd.image.name` and
+  manifest digest, which containerd keeps as is.
+- **docker-archive** (a `manifest.json` and no `index.json`, as `skopeo copy
+  … docker-archive:` and older `docker save` write): each of its `RepoTags`,
+  named the way containerd names it on import (`pause:3.10` becomes
+  `docker.io/library/pause:3.10`), and the digest of its image configuration.
+  containerd writes a manifest of its own for such an image, so the
+  configuration, copied byte for byte, is what both have in common. The
+  script hashes it from the archive, and reads the one containerd holds from
+  the manifest with `ctr content get`, once per image per run.
+
+Otherwise the archive is imported: when it has neither file, an unnamed or
+untagged image, an `index.json`, `manifest.json` or configuration over 1 MiB,
+when the name points at something other than a single manifest, and when
+`ctr` cannot answer. This needs `jq` and GNU `tar`, which the package
+requires.
 
 A tarball that fails to import does not stop the ones after it. The run tries
 every archive, names each one it could not import, and then exits non-zero, so

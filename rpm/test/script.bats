@@ -23,7 +23,10 @@ setup() {
     CTR_CHECK_LOG="$TMP/ctr.check.log"
     CTR_CHECK_FAIL="$TMP/ctr.check.fail"
     CTR_CHECK_PARTIAL="$TMP/ctr.check.partial"
-    mkdir -p "$CACHE" "$BIN"
+    CTR_CONTENT="$TMP/ctr.content"
+    CTR_CONTENT_LOG="$TMP/ctr.content.log"
+    mkdir -p "$CACHE" "$BIN" "$CTR_CONTENT"
+    : > "$CTR_CONTENT_LOG"
     : > "$CTR_LOG"
     : > "$CTR_FAIL"
     : > "$CTR_RM"
@@ -33,9 +36,20 @@ setup() {
     # $CTR_FAIL, the way containerd reports one it cannot read. The archive is
     # the last argument, and is matched by its path inside the cache: the same
     # file name legitimately lives flat and in a subdirectory. `images check`
-    # prints $CTR_IMAGES and logs to $CTR_CHECK_LOG.
+    # prints $CTR_IMAGES and logs to $CTR_CHECK_LOG. `content get` prints the
+    # blob stored under its digest in $CTR_CONTENT, fails on any other, and
+    # logs to $CTR_CONTENT_LOG.
     cat > "$BIN/ctr" <<EOF
 #!/usr/bin/env bash
+if [ "\$3 \$4" = "content get" ]; then
+    echo "\$5" >> "$CTR_CONTENT_LOG"
+    if [ -f "$CTR_CONTENT/\$5" ]; then
+        cat "$CTR_CONTENT/\$5"
+        exit 0
+    fi
+    echo "ctr: \$5: not found" >&2
+    exit 1
+fi
 if [ "\$3 \$4" = "images check" ]; then
     echo "\$*" >> "$CTR_CHECK_LOG"
     if [ -e "$CTR_CHECK_FAIL" ]; then
@@ -116,6 +130,43 @@ write_index() {
 tar_archive() {
     mkdir -p "$(dirname "$1")"
     tar -cf "$1" -C "$2" blobs oci-layout index.json
+}
+
+# Write a docker-archive at $1, the way skopeo and Docker before 25 write
+# one: a manifest.json and no index.json. Each image is a "tag[,tag...]" and
+# a configuration given verbatim, stored under the file name of its hash.
+# Prints nothing; the digest of a configuration is $(config_digest CONTENT).
+make_docker_archive() {
+    local archive="$1" dir entries="" sep="" tags config file
+    shift
+    dir="$(mktemp -d "$TMP/docker-archive.XXXXXX")"
+    while [ "$#" -ge 2 ]; do
+        tags="$(jq -cn --arg t "$1" '$t | split(",")')"
+        config="$2"
+        file="$(config_digest "${config}" | cut -d: -f2).json"
+        printf '%s' "${config}" > "$dir/$file"
+        entries+="${sep}{\"Config\":\"$file\",\"RepoTags\":${tags},\"Layers\":[\"layer.tar\"]}"
+        sep=","
+        shift 2
+    done
+    head -c 1048576 /dev/zero > "$dir/layer.tar"
+    printf '[%s]' "${entries}" > "$dir/manifest.json"
+    mkdir -p "$(dirname "$archive")"
+    (cd "$dir" && tar -cf "$archive" -- *)
+}
+
+# The digest of an image configuration, given verbatim.
+config_digest() {
+    printf 'sha256:%s' "$(printf '%s' "$1" | sha256sum | cut -d' ' -f1)"
+}
+
+# Have containerd hold an image imported from a docker-archive: its row in
+# `ctr images check`, under the manifest digest $2 that containerd wrote, and
+# that manifest in the content store, naming the configuration $3 verbatim.
+containerd_has_config() {
+    containerd_has "$1" "$2" "${4:-complete (3/3)}" "${5:-true}"
+    printf '{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"mediaType":"application/vnd.docker.container.image.v1+json","digest":"%s","size":1},"layers":[]}' \
+        "$(config_digest "$3")" > "$CTR_CONTENT/$2"
 }
 
 # Add an image to the `ctr images check` output (healthy by default).
@@ -428,14 +479,14 @@ run_preload_on_journal() {
     grep -q "etcd.tar" "$CTR_LOG"
 }
 
-@test "an archive with no OCI index is always imported" {
-    mkdir -p "$TMP/legacy"
-    printf '[]' > "$TMP/legacy/manifest.json"
-    tar -cf "$CACHE/legacy.tar" -C "$TMP/legacy" manifest.json
+@test "an archive with neither an index.json nor a manifest.json is always imported" {
+    mkdir -p "$TMP/neither"
+    : > "$TMP/neither/layer.tar"
+    tar -cf "$CACHE/neither.tar" -C "$TMP/neither" layer.tar
     containerd_has registry.example/etcd:3.5 "$(digest 1)"
     run_preload
     [ "$status" -eq 0 ]
-    grep -q "legacy.tar" "$CTR_LOG"
+    grep -q "neither.tar" "$CTR_LOG"
 }
 
 @test "an oversized index is not trusted to skip the import" {
@@ -492,4 +543,234 @@ run_preload_on_journal() {
     run_preload
     [ "$status" -eq 1 ]
     [[ "$stderr" == *"Failed to import 1 of the 3 cached archives (1 imported, 1 already in containerd, 0 no longer there)"* ]]
+}
+
+@test "a docker-archive whose configuration containerd holds under its tag is not imported again" {
+    make_docker_archive "$CACHE/worker-134-0-0/pause.tar" registry.example/pause:3.10 '{"pause":1}'
+    containerd_has_config registry.example/pause:3.10 "$(digest 1)" '{"pause":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    [ ! -s "$CTR_LOG" ]
+    grep -qxF "$(digest 1)" "$CTR_CONTENT_LOG"
+    [[ "$output" == *"Skipping $CACHE/worker-134-0-0/pause.tar, already in containerd"* ]]
+    [[ "$output" == *"Imported 0 of the 1 cached archives (1 already in containerd, 0 no longer there)"* ]]
+}
+
+@test "a docker-archive with another configuration under the same tag is imported" {
+    make_docker_archive "$CACHE/pause.tar" registry.example/pause:3.10 '{"pause":2}'
+    containerd_has_config registry.example/pause:3.10 "$(digest 1)" '{"pause":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "pause.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive whose configuration containerd holds under another tag only is imported" {
+    make_docker_archive "$CACHE/pause.tar" registry.example/pause:3.10 '{"pause":1}'
+    containerd_has_config registry.example/other:1 "$(digest 1)" '{"pause":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "pause.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive image containerd holds incomplete or not unpacked is imported" {
+    make_docker_archive "$CACHE/incomplete.tar" registry.example/a:1 '{"a":1}'
+    make_docker_archive "$CACHE/packed.tar" registry.example/b:1 '{"b":1}'
+    containerd_has_config registry.example/a:1 "$(digest 1)" '{"a":1}' "incomplete (2/3)"
+    containerd_has_config registry.example/b:1 "$(digest 2)" '{"b":1}' "complete (3/3)" false
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "incomplete.tar" "$CTR_LOG"
+    grep -q "packed.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive is imported when containerd lacks one of its images" {
+    make_docker_archive "$CACHE/control-plane.tar" \
+        registry.example/apiserver:1 '{"apiserver":1}' \
+        registry.example/scheduler:1 '{"scheduler":1}'
+    containerd_has_config registry.example/apiserver:1 "$(digest 1)" '{"apiserver":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "control-plane.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive is skipped only when containerd holds every tag of an image" {
+    make_docker_archive "$CACHE/pause.tar" registry.example/pause:3.10,registry.example/pause:stable '{"pause":1}'
+    containerd_has_config registry.example/pause:3.10 "$(digest 1)" '{"pause":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "pause.tar" "$CTR_LOG"
+    containerd_has_config registry.example/pause:stable "$(digest 1)" '{"pause":1}'
+    : > "$CTR_LOG"
+    run_preload
+    [ "$status" -eq 0 ]
+    [ ! -s "$CTR_LOG" ]
+}
+
+@test "docker-archive tags are matched under the names containerd gives them" {
+    # Each name on the right is what containerd 1.6, 1.7 and 2.4 list after
+    # importing a docker-archive tagged with the name on the left.
+    local pair tag name n=0
+    for pair in \
+        "pause:short docker.io/library/pause:short" \
+        "myorg/pause:1 docker.io/myorg/pause:1" \
+        "myorg/pause docker.io/myorg/pause:latest" \
+        "pause docker.io/library/pause:latest" \
+        "docker.io/pause:6 docker.io/library/pause:6" \
+        "index.docker.io/library/pause:4 docker.io/library/pause:4" \
+        "localhost/pause:2 localhost/pause:2" \
+        "reg:5000/pause:3 reg:5000/pause:3" \
+        "reg:5000/pause reg:5000/pause:latest" \
+        "Upper/pause:5 Upper/pause:5" \
+        "a.example/deep/path/p:1 a.example/deep/path/p:1"; do
+        tag="${pair% *}"
+        name="${pair#* }"
+        n=$((n + 1))
+        make_docker_archive "$CACHE/image-$n.tar" "$tag" "{\"n\":$n}"
+        containerd_has_config "$name" "$(printf 'sha256:%064d' "$n")" "{\"n\":$n}"
+    done
+    run_preload
+    [ "$status" -eq 0 ]
+    [ ! -s "$CTR_LOG" ]
+    [[ "$output" == *"Imported 0 of the 11 cached archives (11 already in containerd, 0 no longer there)"* ]]
+}
+
+@test "a docker-archive tag is not matched under a name containerd would not give it" {
+    make_docker_archive "$CACHE/pause.tar" pause:3.10 '{"pause":1}'
+    containerd_has_config pause:3.10 "$(digest 1)" '{"pause":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "pause.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive configuration is identified by its hash, not by its file name" {
+    # The file is named after the configuration containerd holds, but holds
+    # another one: containerd would import this other one.
+    local dir="$TMP/misnamed" held='{"pause":1}'
+    mkdir -p "$dir"
+    printf '%s' '{"pause":2}' > "$dir/$(config_digest "$held" | cut -d: -f2).json"
+    printf '[{"Config":"%s.json","RepoTags":["registry.example/pause:3.10"],"Layers":[]}]' \
+        "$(config_digest "$held" | cut -d: -f2)" > "$dir/manifest.json"
+    (cd "$dir" && tar -cf "$CACHE/pause.tar" -- *)
+    containerd_has_config registry.example/pause:3.10 "$(digest 1)" "$held"
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "pause.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive whose configuration file is missing is imported" {
+    local dir="$TMP/noconfig"
+    mkdir -p "$dir"
+    printf '[{"Config":"%s.json","RepoTags":["registry.example/pause:3.10"],"Layers":[]}]' \
+        "$(config_digest '{"pause":1}' | cut -d: -f2)" > "$dir/manifest.json"
+    tar -cf "$CACHE/pause.tar" -C "$dir" manifest.json
+    containerd_has_config registry.example/pause:3.10 "$(digest 1)" '{"pause":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "pause.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive with an untagged image is always imported" {
+    make_docker_archive "$CACHE/pause.tar" registry.example/pause:3.10 '{"pause":1}' "" '{"other":1}'
+    containerd_has_config registry.example/pause:3.10 "$(digest 1)" '{"pause":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "pause.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive with an empty or broken manifest.json is always imported" {
+    mkdir -p "$TMP/empty" "$TMP/broken"
+    printf '[]' > "$TMP/empty/manifest.json"
+    printf '[{"Config":' > "$TMP/broken/manifest.json"
+    tar -cf "$CACHE/empty.tar" -C "$TMP/empty" manifest.json
+    tar -cf "$CACHE/broken.tar" -C "$TMP/broken" manifest.json
+    containerd_has registry.example/etcd:3.5 "$(digest 1)"
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "empty.tar" "$CTR_LOG"
+    grep -q "broken.tar" "$CTR_LOG"
+}
+
+@test "an oversized manifest.json is not trusted to skip the import" {
+    local dir="$TMP/huge" padding file
+    padding="$(head -c 1100000 /dev/zero | tr '\0' x)"
+    file="$(config_digest '{"pause":1}' | cut -d: -f2).json"
+    mkdir -p "$dir"
+    printf '%s' '{"pause":1}' > "$dir/$file"
+    printf '[{"Config":"%s","RepoTags":["registry.example/pause:3.10"],"Pad":"%s"}]' \
+        "$file" "$padding" > "$dir/manifest.json"
+    (cd "$dir" && tar -cf "$CACHE/pause.tar" -- *)
+    containerd_has_config registry.example/pause:3.10 "$(digest 1)" '{"pause":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "pause.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive tag that points at an index in containerd is imported" {
+    # Pulled from a registry rather than imported: the name points at an
+    # index, which has no configuration of its own.
+    make_docker_archive "$CACHE/pause.tar" registry.example/pause:3.10 '{"pause":1}'
+    containerd_has registry.example/pause:3.10 "$(digest 1)"
+    printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}' \
+        > "$CTR_CONTENT/$(digest 1)"
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "pause.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive is imported when containerd cannot give the manifest" {
+    make_docker_archive "$CACHE/pause.tar" registry.example/pause:3.10 '{"pause":1}'
+    containerd_has registry.example/pause:3.10 "$(digest 1)"
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "pause.tar" "$CTR_LOG"
+    grep -qxF "$(digest 1)" "$CTR_CONTENT_LOG"
+}
+
+@test "containerd is asked for each manifest once per run" {
+    make_docker_archive "$CACHE/a.tar" registry.example/pause:3.10 '{"pause":1}'
+    mkdir -p "$CACHE/worker-134-0-0"
+    make_docker_archive "$CACHE/worker-134-0-0/b.tar" registry.example/pause:3.10 '{"pause":1}'
+    containerd_has_config registry.example/pause:3.10 "$(digest 1)" '{"pause":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    [ ! -s "$CTR_LOG" ]
+    [ "$(grep -c . "$CTR_CONTENT_LOG")" -eq 1 ]
+}
+
+@test "an archive with an index.json is read as OCI even when it has a manifest.json" {
+    # Docker 25 and later write both, and containerd imports from index.json.
+    local dir="$TMP/both" config='{"pause":1}'
+    write_index "$dir" "{\"schemaVersion\":2,\"manifests\":[{\"digest\":\"$(digest 2)\",\"annotations\":{\"io.containerd.image.name\":\"registry.example/pause:3.10\"}}]}"
+    printf '%s' "$config" > "$dir/config.json"
+    printf '[{"Config":"config.json","RepoTags":["registry.example/pause:3.10"],"Layers":[]}]' > "$dir/manifest.json"
+    tar -cf "$CACHE/pause.tar" -C "$dir" blobs oci-layout index.json manifest.json config.json
+    # The manifest.json would match, but not the index.json.
+    containerd_has_config registry.example/pause:3.10 "$(digest 1)" "$config"
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "pause.tar" "$CTR_LOG"
+    [ ! -s "$CTR_CONTENT_LOG" ]
+}
+
+@test "an OCI archive does not ask containerd for manifests" {
+    make_archive "$CACHE/etcd.tar" registry.example/etcd:3.5 "$(digest 1)"
+    containerd_has registry.example/etcd:3.5 "$(digest 1)"
+    run_preload
+    [ "$status" -eq 0 ]
+    [ ! -s "$CTR_LOG" ]
+    [ ! -s "$CTR_CONTENT_LOG" ]
+}
+
+@test "OCI archives and docker-archives are skipped side by side" {
+    make_archive "$CACHE/etcd.tar" registry.example/etcd:3.5 "$(digest 1)"
+    make_docker_archive "$CACHE/pause.tar" registry.example/pause:3.10 '{"pause":1}'
+    make_docker_archive "$CACHE/nginx.tar" registry.example/nginx:1 '{"nginx":1}'
+    containerd_has registry.example/etcd:3.5 "$(digest 1)"
+    containerd_has_config registry.example/pause:3.10 "$(digest 2)" '{"pause":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    [ "$(grep -c . "$CTR_LOG")" -eq 1 ]
+    grep -q "nginx.tar" "$CTR_LOG"
+    [[ "$output" == *"Imported 1 of the 3 cached archives (2 already in containerd, 0 no longer there)"* ]]
 }

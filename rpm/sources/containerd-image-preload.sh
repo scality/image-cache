@@ -139,22 +139,29 @@ ready_config() {
     [ -n "${config}" ]
 }
 
+# The image names already_imported read from the archive it was last given,
+# empty when it could not read them.
+archive_names=""
+
 # True when containerd already holds every image of the archive. Like
 # containerd, it reads an archive with an index.json as OCI, even when it also
 # has the manifest.json that Docker 25 and later write next to it.
 already_imported() {
     local members images line name digest config
+    archive_names=""
     [ -n "${ready}" ] || return 1
     members="$(tar --seek -tf "$1" 2> /dev/null)" || return 1
     if grep -qxF index.json <<< "${members}"; then
         images="$(oci_archive_images "$1")" || return 1
         [ -n "${images}" ] || return 1
+        archive_names="$(cut -d' ' -f1 <<< "${images}")"
         while IFS= read -r line; do
             grep -qxF -- "${line}" <<< "${ready}" || return 1
         done <<< "${images}"
     elif grep -qxF manifest.json <<< "${members}"; then
         images="$(docker_archive_images "$1")" || return 1
         [ -n "${images}" ] || return 1
+        archive_names="$(cut -d' ' -f1 <<< "${images}")"
         while read -r name digest; do
             ready_config "${name}" || return 1
             [ "${config}" = "${digest}" ] || return 1
@@ -162,6 +169,19 @@ already_imported() {
     else
         return 1
     fi
+}
+
+# Drops the names of the archive just imported from ready. Two archives can
+# hold the same name with different images: ready was listed before the
+# first one moved the name, so it would still show the second as present,
+# and the name would switch between the two at every run. Without them, the
+# later archive is imported too, and the last one wins, as it does when
+# nothing is skipped. This holds whether the import worked or not: one that
+# failed may still have moved a name.
+forget_archive_names() {
+    [ -n "${archive_names}" ] || return 0
+    ready="$(awk 'NR == FNR { names[$1]; next } !($1 in names)' \
+        <(printf '%s\n' "${archive_names}") <(printf '%s\n' "${ready}"))"
 }
 
 archives=("${IMAGE_CACHE_DIR}"/*.tar "${IMAGE_CACHE_DIR}"/*/*.tar)
@@ -201,6 +221,7 @@ for tar in "${archives[@]}"; do
         error "Failed to import ${tar}"
         failures=$((failures + 1))
     fi
+    forget_archive_names
 done
 
 imported=$((scanned - skipped - current - failures))

@@ -774,3 +774,108 @@ run_preload_on_journal() {
     grep -q "nginx.tar" "$CTR_LOG"
     [[ "$output" == *"Imported 1 of the 3 cached archives (2 already in containerd, 0 no longer there)"* ]]
 }
+
+@test "a later OCI archive holding a name the run just imported is imported too" {
+    # containerd holds the name at b's image, as the last run left it. a moves
+    # it, so b must go in again, or the name would switch at every run.
+    make_archive "$CACHE/a.tar" registry.example/postgres:17 "$(digest 1)"
+    make_archive "$CACHE/b.tar" registry.example/postgres:17 "$(digest 2)"
+    containerd_has registry.example/postgres:17 "$(digest 2)"
+    run_preload
+    [ "$status" -eq 0 ]
+    [ "$(grep -c . "$CTR_LOG")" -eq 2 ]
+    [ "$(sed -n 1p "$CTR_LOG" | grep -c "/a.tar$")" -eq 1 ]
+    [ "$(sed -n 2p "$CTR_LOG" | grep -c "/b.tar$")" -eq 1 ]
+}
+
+@test "a later docker-archive holding a name the run just imported is imported too" {
+    make_docker_archive "$CACHE/a.tar" registry.example/postgres:17 '{"postgres":1}'
+    make_docker_archive "$CACHE/b.tar" registry.example/postgres:17 '{"postgres":2}'
+    containerd_has_config registry.example/postgres:17 "$(digest 2)" '{"postgres":2}'
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "/a.tar$" "$CTR_LOG"
+    grep -q "/b.tar$" "$CTR_LOG"
+}
+
+@test "a name imported from an OCI archive is not taken as present for a later docker-archive" {
+    # Short tag: the docker-archive is matched under its normalized name.
+    make_archive "$CACHE/a.tar" docker.io/library/postgres:17 "$(digest 1)"
+    make_docker_archive "$CACHE/b.tar" postgres:17 '{"postgres":2}'
+    containerd_has_config docker.io/library/postgres:17 "$(digest 2)" '{"postgres":2}'
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "/a.tar$" "$CTR_LOG"
+    grep -q "/b.tar$" "$CTR_LOG"
+}
+
+@test "a name imported from a docker-archive is not taken as present for a later OCI archive" {
+    make_docker_archive "$CACHE/a.tar" registry.example/postgres:17 '{"postgres":1}'
+    make_archive "$CACHE/b.tar" registry.example/postgres:17 "$(digest 2)"
+    containerd_has registry.example/postgres:17 "$(digest 2)"
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "/a.tar$" "$CTR_LOG"
+    grep -q "/b.tar$" "$CTR_LOG"
+}
+
+@test "an import only forgets the names of the archive it imported" {
+    make_archive "$CACHE/a.tar" registry.example/postgres:17 "$(digest 1)"
+    make_archive "$CACHE/b.tar" registry.example/redis:7 "$(digest 2)"
+    make_docker_archive "$CACHE/c.tar" registry.example/pause:3.10 '{"pause":1}'
+    containerd_has registry.example/redis:7 "$(digest 2)"
+    containerd_has_config registry.example/pause:3.10 "$(digest 3)" '{"pause":1}'
+    run_preload
+    [ "$status" -eq 0 ]
+    [ "$(grep -c . "$CTR_LOG")" -eq 1 ]
+    grep -q "/a.tar$" "$CTR_LOG"
+    [[ "$output" == *"Imported 1 of the 3 cached archives (2 already in containerd, 0 no longer there)"* ]]
+}
+
+@test "a skipped archive does not make a later one with the same name imported" {
+    # Same name, same image in both: nothing moved it, both stay skipped.
+    make_archive "$CACHE/a.tar" registry.example/postgres:17 "$(digest 1)"
+    make_archive "$CACHE/b.tar" registry.example/postgres:17 "$(digest 1)"
+    containerd_has registry.example/postgres:17 "$(digest 1)"
+    run_preload
+    [ "$status" -eq 0 ]
+    [ ! -s "$CTR_LOG" ]
+}
+
+@test "a failed import forgets its names too" {
+    # A failed import may still have moved a name before it gave up.
+    make_archive "$CACHE/a.tar" registry.example/postgres:17 "$(digest 1)"
+    make_archive "$CACHE/b.tar" registry.example/postgres:17 "$(digest 2)"
+    containerd_has registry.example/postgres:17 "$(digest 2)"
+    fail_on a.tar
+    run_preload
+    [ "$status" -eq 1 ]
+    grep -q "/b.tar$" "$CTR_LOG"
+}
+
+@test "an archive whose names cannot be read does not keep the others from being skipped" {
+    mkdir -p "$TMP/neither"
+    : > "$TMP/neither/layer.tar"
+    tar -cf "$CACHE/a.tar" -C "$TMP/neither" layer.tar
+    make_archive "$CACHE/b.tar" registry.example/redis:7 "$(digest 2)"
+    containerd_has registry.example/redis:7 "$(digest 2)"
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "/a.tar$" "$CTR_LOG"
+    run ! grep -q "/b.tar$" "$CTR_LOG"
+}
+
+@test "an archive whose names cannot be read forgets none of the names read before it" {
+    # a is skipped; importing b, whose names are unknown, must not drop a's
+    # names, so c, which holds the same image as a, is still skipped.
+    make_archive "$CACHE/a.tar" registry.example/postgres:17 "$(digest 1)"
+    mkdir -p "$TMP/neither"
+    : > "$TMP/neither/layer.tar"
+    tar -cf "$CACHE/b.tar" -C "$TMP/neither" layer.tar
+    make_archive "$CACHE/c.tar" registry.example/postgres:17 "$(digest 1)"
+    containerd_has registry.example/postgres:17 "$(digest 1)"
+    run_preload
+    [ "$status" -eq 0 ]
+    [ "$(grep -c . "$CTR_LOG")" -eq 1 ]
+    grep -q "/b.tar$" "$CTR_LOG"
+}

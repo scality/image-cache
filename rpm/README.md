@@ -94,6 +94,12 @@ when the name points at something other than a single manifest, and when
 `ctr` cannot answer. This needs `jq` and GNU `tar`, which the package
 requires.
 
+When two archives hold the same image name with different images, the last
+one imported wins, as when nothing is skipped. Once the run imports an
+archive, it no longer takes that archive's names as present, so a later
+archive holding one of them is imported too. Both are then imported at every
+run: give each name to one archive only to have them skipped.
+
 A tarball that fails to import does not stop the ones after it. The run tries
 every archive, names each one it could not import, and then exits non-zero, so
 the unit still reports the failure while the node gets every image the cache

@@ -879,3 +879,69 @@ run_preload_on_journal() {
     [ "$(grep -c . "$CTR_LOG")" -eq 1 ]
     grep -q "/b.tar$" "$CTR_LOG"
 }
+
+# Write a docker-archive at $1 whose manifest.json is $2 verbatim, next to a
+# configuration file, and have containerd hold its tag ready.
+make_raw_docker_archive() {
+    local dir
+    dir="$(mktemp -d "$TMP/raw.XXXXXX")"
+    printf '%s' '{"pause":1}' > "$dir/config.json"
+    printf '%s' "$2" > "$dir/manifest.json"
+    (cd "$dir" && tar -cf "$1" -- *)
+    containerd_has_config registry.example/pause:3.10 "$(digest 1)" '{"pause":1}'
+}
+
+@test "a docker-archive configuration path is never read as a tar option" {
+    make_raw_docker_archive "$CACHE/evil.tar" \
+        "[{\"Config\":\"--to-command=touch $TMP/pwned\",\"RepoTags\":[\"registry.example/pause:3.10\"],\"Layers\":[]}]"
+    run_preload
+    [ "$status" -eq 0 ]
+    [ ! -e "$TMP/pwned" ]
+    [ -z "$stderr" ]
+    grep -q "evil.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive with an empty configuration path is imported, quietly" {
+    make_raw_docker_archive "$CACHE/empty.tar" \
+        '[{"Config":"","RepoTags":["registry.example/pause:3.10"],"Layers":[]}]'
+    run_preload
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    grep -q "empty.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive with white space in a configuration path or a tag is imported" {
+    make_raw_docker_archive "$CACHE/space.tar" \
+        '[{"Config":"config .json","RepoTags":["registry.example/pause:3.10"],"Layers":[]}]'
+    make_raw_docker_archive "$CACHE/newline.tar" \
+        '[{"Config":"config.json\nregistry.example/pause:3.10 x","RepoTags":["registry.example/pause:3.10"],"Layers":[]}]'
+    make_raw_docker_archive "$CACHE/tag.tar" \
+        '[{"Config":"config.json","RepoTags":["registry.example/pause:3.10 sha256:00"],"Layers":[]}]'
+    run_preload
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    grep -q "space.tar" "$CTR_LOG"
+    grep -q "newline.tar" "$CTR_LOG"
+    grep -q "tag.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive with tags that are not a list of strings is imported" {
+    make_raw_docker_archive "$CACHE/string.tar" \
+        '[{"Config":"config.json","RepoTags":"registry.example/pause:3.10","Layers":[]}]'
+    make_raw_docker_archive "$CACHE/number.tar" \
+        '[{"Config":"config.json","RepoTags":[1],"Layers":[]}]'
+    run_preload
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    grep -q "string.tar" "$CTR_LOG"
+    grep -q "number.tar" "$CTR_LOG"
+}
+
+@test "a well-formed raw docker-archive is still skipped" {
+    # Guards the stricter filter: the helper itself must still give a skip.
+    make_raw_docker_archive "$CACHE/good.tar" \
+        '[{"Config":"config.json","RepoTags":["registry.example/pause:3.10"],"Layers":[]}]'
+    run_preload
+    [ "$status" -eq 0 ]
+    [ ! -s "$CTR_LOG" ]
+}

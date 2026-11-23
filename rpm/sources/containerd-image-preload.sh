@@ -48,9 +48,11 @@ ready_images() {
 
 # One file at the root of an archive, cut at MEMBER_MAX_BYTES. Fails when
 # the archive does not hold it. A file cut short fails whatever reads it: it
-# is no longer valid JSON, and it no longer hashes to its digest.
+# is no longer valid JSON, and it no longer hashes to its digest. The name
+# can come from the archive itself, and GNU tar reads an option even after
+# the archive, so `--` keeps it a name.
 archive_member() {
-    tar --seek --occurrence=1 -xOf "$1" "$2" 2> /dev/null |
+    tar --seek --occurrence=1 -xOf "$1" -- "$2" 2> /dev/null |
         head -c "${MEMBER_MAX_BYTES}"
 }
 
@@ -97,7 +99,9 @@ normalize_name() {
 # digest of the image configuration. containerd writes a manifest of its own
 # on import, so the configuration, copied byte for byte, is what the archive
 # and containerd have in common. Its digest is the hash of the file, not its
-# name. Fails when an image has no tag.
+# name. Fails when an image has no tag. A configuration path or tag that is
+# empty or holds white space would not survive the "name config" lines, and
+# a path starting with a dash would read as an option, so those fail too.
 docker_archive_images() {
     local entries name config sum
     local -A config_digests=()
@@ -105,7 +109,10 @@ docker_archive_images() {
         jq -r '
             if type == "array" and length > 0
                and all(.[]; (.Config | type) == "string"
-                            and ((.RepoTags // []) | length) > 0)
+                            and (.Config | test("^[^-\\s][^\\s]*$"))
+                            and ((.RepoTags // []) | type) == "array"
+                            and ((.RepoTags // []) | length) > 0
+                            and all(.RepoTags[]; type == "string" and test("^[^\\s]+$")))
             then .[] | .Config as $config | .RepoTags[] | "\(.) \($config)"
             else error("not every image is tagged") end
         ' 2> /dev/null)" || return 1

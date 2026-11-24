@@ -78,6 +78,10 @@ const agentSelector = "control-plane=controller-manager"
 // synced label, then garbage collection once it is deleted.
 const syncedName = "imagecache-e2e-synced"
 
+// plainIPName is the ImageCache that names the plain HTTP registry by its
+// ClusterIP, a private address the library also tries over plain HTTP.
+const plainIPName = "imagecache-e2e-plain-ip"
+
 // tlsName is the ImageCache that pulls from the registry signed by a
 // throwaway CA, to exercise --ca-file through the shipped patch.
 const tlsName = "imagecache-e2e-tls"
@@ -371,6 +375,46 @@ spec:
 			}).Should(Succeed())
 		})
 
+		It("should refuse an unlisted plain HTTP registry named by its ClusterIP, then pull once it is listed", func() {
+			deployRegistry("registry", "")
+			digest := pushCarrier("registry", nil)
+			cmd := exec.Command("kubectl", "get", "svc", "registry", "-n", registryNamespace,
+				"-o", "jsonpath={.spec.clusterIP}")
+			ip, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to get the registry ClusterIP")
+			host := net.JoinHostPort(ip, "5000")
+
+			By("creating an ImageCache that names the registry by its ClusterIP, unlisted")
+			worker := utils.WorkerNode()
+			applyImageCacheFrom(plainIPName, worker, host+"/e2e/carrier:1")
+
+			By("waiting for the agent to refuse the plain HTTP attempt")
+			Eventually(func() (string, error) {
+				cmd := exec.Command("kubectl", "logs", "-l", agentSelector, "-n", namespace, "--tail=-1")
+				return utils.Run(cmd)
+			}).Should(ContainSubstring("plain HTTP to an unlisted registry refused"))
+			labels, err := nodeLabels(worker)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(labels).To(HaveKeyWithValue(labelKey(plainIPName), "pending"))
+
+			By("restarting the agent with the ClusterIP listed")
+			listPlainHTTP(host)
+			Eventually(func(g Gomega) {
+				labels, err := nodeLabels(worker)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(labels).To(HaveKeyWithValue(labelKey(plainIPName), "synced"))
+			}).Should(Succeed())
+			expectExtracted(worker, cachePath+"/"+plainIPName, digest)
+
+			By("deleting the ImageCache, so no agent-owned state outlives the run")
+			cmd = exec.Command("kubectl", "delete", "imagecache", plainIPName)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the ImageCache")
+			Eventually(func() (bool, error) {
+				return pathExists(worker, cachePath+"/"+plainIPName)
+			}).Should(BeFalse())
+		})
+
 		It("should refuse a registry signed by an unknown CA, then pull once the registry CA patch is applied", func() {
 			ca, cert, key := newRegistryCerts("registry-tls." + registryNamespace + ".svc.cluster.local")
 			deployRegistry("registry-tls", tlsSecret("registry-tls", cert, key))
@@ -502,7 +546,12 @@ func patchAgent(args ...string) {
 // allowPlainHTTP restarts the agent with the named in-cluster registry listed
 // in --plain-http-registry, written as applyImageCache's sources name it.
 func allowPlainHTTP(registry string) {
-	arg := fmt.Sprintf("--plain-http-registry=%s.%s.svc.cluster.local:5000", registry, registryNamespace)
+	listPlainHTTP(fmt.Sprintf("%s.%s.svc.cluster.local:5000", registry, registryNamespace))
+}
+
+// listPlainHTTP restarts the agent with host listed in --plain-http-registry.
+func listPlainHTTP(host string) {
+	arg := "--plain-http-registry=" + host
 	patchAgent("--type=json",
 		`-p=[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"`+arg+`"}]`)
 }
@@ -516,6 +565,12 @@ func waitAgentRollout() {
 // applyImageCache creates an ImageCache that selects one node and pulls the
 // carrier image from the named in-cluster registry.
 func applyImageCache(name, node, registry string) {
+	applyImageCacheFrom(name, node, fmt.Sprintf("%s.%s.svc.cluster.local:5000/e2e/carrier:1", registry, registryNamespace))
+}
+
+// applyImageCacheFrom creates an ImageCache that selects one node and pulls
+// source.
+func applyImageCacheFrom(name, node, source string) {
 	cmd := exec.Command("kubectl", "apply", "-f", "-")
 	cmd.Stdin = strings.NewReader(fmt.Sprintf(`apiVersion: image-cache.scality.com/v1alpha1
 kind: ImageCache
@@ -524,8 +579,8 @@ metadata:
 spec:
   nodeSelector:
     kubernetes.io/hostname: %s
-  source: %s.%s.svc.cluster.local:5000/e2e/carrier:1
-`, name, node, registry, registryNamespace))
+  source: %s
+`, name, node, source))
 	_, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to create the ImageCache")
 }

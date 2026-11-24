@@ -392,7 +392,7 @@ spec:
 			Eventually(func() (string, error) {
 				cmd := exec.Command("kubectl", "logs", "-l", agentSelector, "-n", namespace, "--tail=-1")
 				return utils.Run(cmd)
-			}).Should(ContainSubstring("plain HTTP to an unlisted registry refused"))
+			}).Should(ContainSubstring("plain http to an unlisted registry refused: registry='" + host + "'"))
 			labels, err := nodeLabels(worker)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(labels).To(HaveKeyWithValue(labelKey(plainIPName), "pending"))

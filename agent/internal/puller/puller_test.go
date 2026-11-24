@@ -1415,6 +1415,23 @@ func TestRemotePullNeverReachesAnUnlistedLocalRegistryOverHTTP(t *testing.T) {
 	}
 }
 
+// An unlisted registry on a loopback IP that serves HTTPS: the library also
+// tries plain HTTP for it, the transport refuses that attempt, and the HTTPS
+// one must still win.
+func TestRemotePullReachesAnUnlistedHTTPSRegistryByIP(t *testing.T) {
+	ref, caFile, _ := tlsRegistry(t)
+	_, port, _ := net.SplitHostPort(registryOf(t, ref))
+	ref = net.JoinHostPort("127.0.0.1", port) + workerRefPath
+
+	rc, _, err := Remote{transport: loopbackTransport(caFile, t)}.Pull(t.Context(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readAll(t, rc); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A registry on HTTPS may redirect its blobs to storage on plain HTTP. Only
 // the pulled registry is held to HTTPS, so the pull goes through.
 func TestRemotePullFollowsABlobRedirectToPlainHTTPStorage(t *testing.T) {

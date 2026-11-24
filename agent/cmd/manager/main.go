@@ -115,9 +115,8 @@ func main() {
 	flag.BoolVar(&skipVerify, "insecure-skip-tls-verify", false,
 		"Accept any registry certificate. For a test cluster set up by hand only.")
 	flag.Var(&plainHTTPRegistries, "plain-http-registry",
-		"A registry, as host[:port], the agent may reach over plain HTTP. Repeat it for several. "+
-			"It must be written as the sources name it: by IP or by name, with the port they carry. "+
-			"Any other registry is reached over HTTPS only. Excludes --insecure-skip-tls-verify.")
+		"A registry, as host[:port] exactly as the sources name it, the agent may reach over plain HTTP. "+
+			"Repeatable. Excludes --insecure-skip-tls-verify.")
 	opts := zap.Options{
 		Development: true,
 	}

@@ -317,11 +317,10 @@ Pulling and extraction use
   to answer and a bad certificate fails the pull again. It only checks the
   registry of the pulled image: a redirect to another host, such as blob
   storage on plain HTTP, goes through, each blob being checked against its
-  digest. Without it, a registry
-  on a private address, the usual case on premises, would be reached over
-  plain HTTP whatever the list says. `imagecachectl import` goes through the
-  same transport: without `--plain-http` it refuses plain HTTP to such an
-  address too.
+  digest. Without it, a registry on a private address, the usual case on
+  premises, would be reached over plain HTTP whatever the list says.
+  `imagecachectl import` goes through the same transport: without
+  `--plain-http` it refuses plain HTTP to such an address too.
   `--plain-http-registry` lists registries, as `host[:port]`, to mark
   insecure (`name.Insecure`). For those, the client tries HTTPS first, and
   also HTTP when HTTPS fails or takes more than 300ms: the first answer wins,
@@ -333,14 +332,12 @@ Pulling and extraction use
   registry. Docker's `insecure-registries` and containerd's `hosts.toml`
   scope it the same way.
   An entry matches the registry of a parsed reference
-  (`Context().RegistryStr()`) exactly, after the same normalization, so
-  `docker.io` matches `index.docker.io`. There is no matching by resolved
-  address: a registry listed by IP and referenced by name, or listed without
-  its port, does not match. The list goes with `--ca-file`, which covers the
-  registries that serve TLS, and excludes `--insecure-skip-tls-verify`, meant
-  for test clusters only. `imagecachectl import` keeps a `--plain-http`
-  switch: it pulls one source per run, so the switch already covers that
-  source's registry alone.
+  (`Context().RegistryStr()`) exactly, see
+  [Configuration](README.md#configuration) for how to write one. The list
+  goes with `--ca-file`, which covers the registries that serve TLS, and
+  excludes `--insecure-skip-tls-verify`, meant for test clusters only.
+  `imagecachectl import` keeps a `--plain-http` switch: it pulls one source
+  per run, so the switch already covers that source's registry alone.
 
 The cache images are regular container images (they must remain importable
 and mountable with `ctr` by provisioning tooling), so an artifact-oriented

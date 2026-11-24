@@ -82,12 +82,7 @@ type TLS struct {
 	// up by hand, never for a node.
 	SkipVerify bool
 	// PlainHTTPRegistries lists the registries, as host[:port], the pull may
-	// reach over plain HTTP. Only these are: every other registry stays
-	// HTTPS only, and keeps failing on a bad certificate. The match is exact,
-	// so a registry listed by IP and referenced by name, or listed without
-	// the port its references carry, is not one of them. It goes with
-	// CAFile, which covers the registries that serve TLS, but not with
-	// SkipVerify.
+	// reach over plain HTTP, see agent/README.md for the matching rules.
 	PlainHTTPRegistries []string
 }
 

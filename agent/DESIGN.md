@@ -314,7 +314,10 @@ Pulling and extraction use
   address, or a `localhost` host name, and nothing turns that off. The agent
   hands it a transport that refuses any plain HTTP request to a registry that
   is not listed, before the request leaves, so only the HTTPS attempt is left
-  to answer and a bad certificate fails the pull again. Without it, a registry
+  to answer and a bad certificate fails the pull again. It only checks the
+  registry of the pulled image: a redirect to another host, such as blob
+  storage on plain HTTP, goes through, each blob being checked against its
+  digest. Without it, a registry
   on a private address, the usual case on premises, would be reached over
   plain HTTP whatever the list says. `imagecachectl import` goes through the
   same transport: without `--plain-http` it refuses plain HTTP to such an

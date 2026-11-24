@@ -1415,6 +1415,46 @@ func TestRemotePullNeverReachesAnUnlistedLocalRegistryOverHTTP(t *testing.T) {
 	}
 }
 
+// A registry on HTTPS may redirect its blobs to storage on plain HTTP. Only
+// the pulled registry is held to HTTPS, so the pull goes through.
+func TestRemotePullFollowsABlobRedirectToPlainHTTPStorage(t *testing.T) {
+	reg := registry.New()
+	storage := httptest.NewServer(reg)
+	t.Cleanup(storage.Close)
+	_, storagePort, _ := net.SplitHostPort(strings.TrimPrefix(storage.URL, "http://"))
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/blobs/") {
+			http.Redirect(w, r, "http://storage.example:"+storagePort+r.URL.Path, http.StatusTemporaryRedirect)
+			return
+		}
+		reg.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := strings.TrimPrefix(srv.URL, "https://")
+	if err := crane.Push(img, host+workerRefPath, crane.WithTransport(srv.Client().Transport)); err != nil {
+		t.Fatal(err)
+	}
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	block := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	if err := os.WriteFile(caFile, block, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, port, _ := net.SplitHostPort(host)
+
+	rc, _, err := Remote{transport: loopbackTransport(caFile, t)}.Pull(t.Context(), "example.com:"+port+workerRefPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readAll(t, rc); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A listed registry that serves HTTPS stays reachable. The test server only
 // speaks TLS, so a pull that succeeds went over HTTPS.
 func TestRemotePullWithPlainHTTPStillReachesAnHTTPSRegistry(t *testing.T) {

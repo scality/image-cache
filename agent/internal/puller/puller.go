@@ -220,7 +220,7 @@ func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 	opts := []remote.Option{
 		remote.WithContext(ctx),
 		remote.WithPlatform(platform),
-		remote.WithTransport(httpsOnly{next: next, plain: r.plainHTTP}),
+		remote.WithTransport(httpsOnly{next: next, plain: r.plainHTTP, registry: parsed.Context().RegistryStr()}),
 	}
 	img, err := remote.Image(parsed, opts...)
 	if err != nil {
@@ -231,22 +231,23 @@ func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 	return img, id, err
 }
 
-// httpsOnly refuses a plain HTTP request to any registry that is not listed.
-// Marking a registry insecure is not the only way the library reaches for
-// HTTP: it also races HTTP for a private or loopback IP address and for a
+// httpsOnly refuses a plain HTTP request to the pulled registry unless it is
+// listed. The library also races HTTP for a private or loopback IP and for a
 // localhost name, whatever the list says, see "Pulling and extraction" in
-// agent/DESIGN.md. That cannot be turned off, so the request is stopped here,
-// on its way out, and only the HTTPS attempt is left to answer.
+// agent/DESIGN.md, so the request is stopped here. A redirect to another host,
+// such as blob storage, is left alone: each blob is checked against its digest.
 type httpsOnly struct {
 	next http.RoundTripper
 	// plain is Remote.plainHTTP: the library builds its URLs on the same
 	// RegistryStr, so a listed registry's requests carry it as their host.
 	plain []string
+	// registry is the RegistryStr of the image being pulled.
+	registry string
 }
 
 // RoundTrip implements http.RoundTripper.
 func (t httpsOnly) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Scheme != "https" && !slices.Contains(t.plain, req.URL.Host) {
+	if req.URL.Scheme != "https" && req.URL.Host == t.registry && !slices.Contains(t.plain, req.URL.Host) {
 		return nil, errors.Wrap(ErrUnlistedPlainHTTP, errors.WithProperty("registry", req.URL.Host))
 	}
 	return t.next.RoundTrip(req)

@@ -30,15 +30,12 @@ info() { log 6 1 "$@"; }
 warn() { log 4 2 "$@"; }
 error() { log 3 2 "$@"; }
 
-# Larger index.json, manifest.json or image configurations are not trusted;
-# the archive is imported.
+# Archive metadata larger than this is not trusted: the archive is imported.
 MEMBER_MAX_BYTES=1048576
 
 # "name digest" of each image containerd holds complete and unpacked.
-# STATUS and SIZE contain spaces, so UNPACKED is read as the last field.
-# ctr exits non-zero as soon as one image of the namespace cannot be checked,
-# any image, not only cached ones, yet still prints every row. So its exit
-# code is ignored: only a table with no header means containerd did not answer.
+# ctr exits non-zero when any image fails its check but still prints every
+# row, so only a missing header means containerd did not answer.
 ready_images() {
     local table
     table="$(ctr -n k8s.io images check 2> /dev/null)" || true
@@ -46,18 +43,15 @@ ready_images() {
     awk 'NR > 1 && $4 == "complete" && $NF == "true" { print $1, $3 }' <<< "${table}"
 }
 
-# One file at the root of an archive, cut at MEMBER_MAX_BYTES. Fails when
-# the archive does not hold it. A file cut short fails whatever reads it: it
-# is no longer valid JSON, and it no longer hashes to its digest. The name
-# can come from the archive itself, and GNU tar reads an option even after
-# the archive, so `--` keeps it a name.
+# One file of an archive, cut at MEMBER_MAX_BYTES (a cut file fails to parse
+# or to hash). `--` stops GNU tar from reading a name as an option.
 archive_member() {
     tar --seek --occurrence=1 -xOf "$1" -- "$2" 2> /dev/null |
         head -c "${MEMBER_MAX_BYTES}"
 }
 
-# "name digest" of each image in an OCI archive's index.json, the manifest
-# digest that containerd keeps as is. Fails when an image is unnamed.
+# "name manifest-digest" of each image in an OCI archive. Fails when an image
+# is unnamed.
 oci_archive_images() {
     archive_member "$1" index.json |
         jq -r '
@@ -69,15 +63,12 @@ oci_archive_images() {
         ' 2> /dev/null
 }
 
-# The name containerd gives a docker-archive tag on import: docker.io and
-# library/ added to a short name, latest to an untagged one.
+# The name containerd gives a docker-archive tag on import, as Docker does.
 normalize_name() {
     local name="$1" domain path
     domain="${name%%/*}"
     path="${name#*/}"
-    # As in Docker, a first component is a registry only when it looks like
-    # a host: a dot, a port, localhost, or an upper case letter, which a
-    # repository cannot have.
+    # The first component is a registry only if it looks like a host.
     if [[ "${name}" != */* ]] ||
         [[ "${domain}" != *[.:[:upper:]]* && "${domain}" != localhost ]]; then
         domain=docker.io
@@ -95,13 +86,10 @@ normalize_name() {
     printf '%s/%s\n' "${domain}" "${path}"
 }
 
-# "name digest" of each tag in a docker-archive's manifest.json, with the
-# digest of the image configuration. containerd writes a manifest of its own
-# on import, so the configuration, copied byte for byte, is what the archive
-# and containerd have in common. Its digest is the hash of the file, not its
-# name. Fails when an image has no tag. A configuration path or tag that is
-# empty or holds white space would not survive the "name config" lines, and
-# a path starting with a dash would read as an option, so those fail too.
+# "name config-digest" of each tag in a docker-archive. containerd writes its
+# own manifest on import, so the configuration is what both share; its digest
+# is the hash of the file. Fails on an untagged image, or on a tag or path
+# that is empty, holds white space, or (for a path) starts with a dash.
 docker_archive_images() {
     local entries name config sum
     local -A config_digests=()
@@ -125,13 +113,34 @@ docker_archive_images() {
     done <<< "${entries}"
 }
 
-# Configuration digest of each manifest looked up so far, empty when it could
-# not be read. Kept across archives, so an image is read once per run.
+# Every name an import of the archive can set, read leniently: an archive
+# rejected for a skip still moves the names it does have.
+oci_archive_names() {
+    archive_member "$1" index.json |
+        jq -r '
+            .manifests | arrays | .[] | objects
+            | .annotations | objects | .["io.containerd.image.name"]
+            | strings | select(test("^[^\\s]+$"))
+        ' 2> /dev/null
+}
+
+docker_archive_names() {
+    local tag
+    archive_member "$1" manifest.json |
+        jq -r '
+            arrays | .[] | objects | .RepoTags | arrays | .[]
+            | strings | select(test("^[^\\s]+$"))
+        ' 2> /dev/null |
+        while IFS= read -r tag; do
+            normalize_name "${tag}"
+        done
+}
+
+# Configuration digest per manifest, cached for the run (empty if unreadable).
 declare -A ready_configs=()
 
-# Sets config to the configuration digest of the image containerd holds
-# ready under the name $1. Fails when it holds none, or when the name points
-# at an index rather than at a single manifest.
+# Sets config to the configuration digest of the ready image named $1. Fails
+# when there is none, or when the name points at an index.
 ready_config() {
     local manifest
     manifest="$(name="$1" awk '$1 == ENVIRON["name"] { print $2; exit }' <<< "${ready}")"
@@ -146,29 +155,27 @@ ready_config() {
     [ -n "${config}" ]
 }
 
-# The image names already_imported read from the archive it was last given,
-# empty when it could not read them.
+# Names of the archive last given to already_imported.
 archive_names=""
 
 # True when containerd already holds every image of the archive. Like
-# containerd, it reads an archive with an index.json as OCI, even when it also
-# has the manifest.json that Docker 25 and later write next to it.
+# containerd, it prefers index.json when manifest.json is there too.
 already_imported() {
     local members images line name digest config
     archive_names=""
     [ -n "${ready}" ] || return 1
     members="$(tar --seek -tf "$1" 2> /dev/null)" || return 1
     if grep -qxF index.json <<< "${members}"; then
+        archive_names="$(oci_archive_names "$1")" || true
         images="$(oci_archive_images "$1")" || return 1
         [ -n "${images}" ] || return 1
-        archive_names="$(cut -d' ' -f1 <<< "${images}")"
         while IFS= read -r line; do
             grep -qxF -- "${line}" <<< "${ready}" || return 1
         done <<< "${images}"
     elif grep -qxF manifest.json <<< "${members}"; then
+        archive_names="$(docker_archive_names "$1")" || true
         images="$(docker_archive_images "$1")" || return 1
         [ -n "${images}" ] || return 1
-        archive_names="$(cut -d' ' -f1 <<< "${images}")"
         while read -r name digest; do
             ready_config "${name}" || return 1
             [ "${config}" = "${digest}" ] || return 1
@@ -178,13 +185,10 @@ already_imported() {
     fi
 }
 
-# Drops the names of the archive just imported from ready. Two archives can
-# hold the same name with different images: ready was listed before the
-# first one moved the name, so it would still show the second as present,
-# and the name would switch between the two at every run. Without them, the
-# later archive is imported too, and the last one wins, as it does when
-# nothing is skipped. This holds whether the import worked or not: one that
-# failed may still have moved a name.
+# Drops the names of the archive just imported (or failed: it may have moved
+# some) from ready, so a later archive holding the same name with another
+# image is imported too and the last one wins, instead of the name switching
+# at every run.
 forget_archive_names() {
     [ -n "${archive_names}" ] || return 0
     ready="$(awk 'NR == FNR { names[$1]; next } !($1 in names)' \

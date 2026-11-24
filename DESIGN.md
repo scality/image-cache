@@ -29,9 +29,8 @@ lifetimes, so they are separate components:
   dumb: a shell script, no daemon, no Kubernetes client, no registry access.
   It works on a node whose cluster is down. Archives whose images all show as
   complete and unpacked in `ctr images check` are skipped, since re-importing
-  them costs about twice their size in I/O. An OCI archive's images are
-  matched by the name and manifest digest of its `index.json`, a
-  docker-archive's by the tags and configuration digest of its `manifest.json`.
+  them costs about twice their size in I/O. See
+  [rpm/README.md](rpm/README.md#what-it-imports) for how images are matched.
 
 - **`image-cache-agent`** (a Kubernetes DaemonSet) answers *fill*. It watches
   `ImageCache` custom resources, pulls the images they point at, extracts the

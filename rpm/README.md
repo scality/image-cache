@@ -96,8 +96,9 @@ requires.
 
 When two archives hold the same image name with different images, the last
 one imported wins, as when nothing is skipped. Once the run imports an
-archive, it no longer takes that archive's names as present, so a later
-archive holding one of them is imported too. Both are then imported at every
+archive, it no longer takes the names it could read from that archive as
+present, even from one it could not have skipped, so a later archive
+holding one of them is imported too. Both are then imported at every
 run: give each name to one archive only to have them skipped.
 
 A tarball that fails to import does not stop the ones after it. The run tries

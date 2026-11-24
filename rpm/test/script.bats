@@ -132,10 +132,8 @@ tar_archive() {
     tar -cf "$1" -C "$2" blobs oci-layout index.json
 }
 
-# Write a docker-archive at $1, the way skopeo and Docker before 25 write
-# one: a manifest.json and no index.json. Each image is a "tag[,tag...]" and
-# a configuration given verbatim, stored under the file name of its hash.
-# Prints nothing; the digest of a configuration is $(config_digest CONTENT).
+# Write a docker-archive at $1 (manifest.json, no index.json). Each image is
+# a "tag[,tag...]" and a configuration given verbatim.
 make_docker_archive() {
     local archive="$1" dir entries="" sep="" tags config file
     shift
@@ -160,9 +158,7 @@ config_digest() {
     printf 'sha256:%s' "$(printf '%s' "$1" | sha256sum | cut -d' ' -f1)"
 }
 
-# Have containerd hold an image imported from a docker-archive: its row in
-# `ctr images check`, under the manifest digest $2 that containerd wrote, and
-# that manifest in the content store, naming the configuration $3 verbatim.
+# Have containerd hold $1 ready under manifest $2, whose configuration is $3.
 containerd_has_config() {
     containerd_has "$1" "$2" "${4:-complete (3/3)}" "${5:-true}"
     printf '{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"mediaType":"application/vnd.docker.container.image.v1+json","digest":"%s","size":1},"layers":[]}' \
@@ -944,4 +940,57 @@ make_raw_docker_archive() {
     run_preload
     [ "$status" -eq 0 ]
     [ ! -s "$CTR_LOG" ]
+}
+
+@test "an OCI archive with an unnamed image still forgets the names it does give" {
+    # a cannot be skipped (one image unnamed), but its import still moves
+    # postgres:17, so b, which holds that name too, must go in again.
+    local dir="$TMP/partly"
+    write_index "$dir" "{\"schemaVersion\":2,\"manifests\":[{\"digest\":\"$(digest 1)\",\"annotations\":{\"io.containerd.image.name\":\"registry.example/postgres:17\"}},{\"digest\":\"$(digest 3)\"}]}"
+    tar_archive "$CACHE/a.tar" "$dir"
+    make_archive "$CACHE/b.tar" registry.example/postgres:17 "$(digest 2)"
+    containerd_has registry.example/postgres:17 "$(digest 2)"
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "/a.tar$" "$CTR_LOG"
+    grep -q "/b.tar$" "$CTR_LOG"
+}
+
+@test "a docker-archive with an untagged image still forgets the tags it does give" {
+    # Short tag: forgotten under the name containerd gives it.
+    make_docker_archive "$CACHE/a.tar" postgres:17 '{"postgres":1}' "" '{"other":1}'
+    make_archive "$CACHE/b.tar" docker.io/library/postgres:17 "$(digest 2)"
+    containerd_has docker.io/library/postgres:17 "$(digest 2)"
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "/a.tar$" "$CTR_LOG"
+    grep -q "/b.tar$" "$CTR_LOG"
+}
+
+@test "a docker-archive with a malformed entry still forgets the tags it does give" {
+    local dir="$TMP/malformed"
+    mkdir -p "$dir"
+    printf '[{"Config":"","RepoTags":["registry.example/postgres:17"]},{"Config":"c.json","RepoTags":[1,"bad tag"]}]' \
+        > "$dir/manifest.json"
+    tar -cf "$CACHE/a.tar" -C "$dir" manifest.json
+    make_archive "$CACHE/b.tar" registry.example/postgres:17 "$(digest 2)"
+    containerd_has registry.example/postgres:17 "$(digest 2)"
+    run_preload
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    grep -q "/a.tar$" "$CTR_LOG"
+    grep -q "/b.tar$" "$CTR_LOG"
+}
+
+@test "an archive with a broken index forgets nothing, and stays quiet" {
+    mkdir -p "$TMP/broken"
+    write_index "$TMP/broken" '{"manifests":[{"annotations":'
+    tar_archive "$CACHE/a.tar" "$TMP/broken"
+    make_archive "$CACHE/b.tar" registry.example/redis:7 "$(digest 2)"
+    containerd_has registry.example/redis:7 "$(digest 2)"
+    run_preload
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    grep -q "/a.tar$" "$CTR_LOG"
+    run ! grep -q "/b.tar$" "$CTR_LOG"
 }

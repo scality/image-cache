@@ -3,7 +3,7 @@
 ARG KUBECTL_VERSION=v1.37.1@sha256:b7cab618e281b1ee7484e7b706a96e2135fbb6e072c2a573a7dab4e87d7f2385
 FROM registry.k8s.io/kubectl:${KUBECTL_VERSION} AS kubectl
 
-FROM mcr.microsoft.com/devcontainers/go:1.27-trixie@sha256:c83c320b68e27dc36903cd5ee07394870c5330dfd77b0897e78c7e1aa00ddfd0
+FROM mcr.microsoft.com/devcontainers/go:1.27-trixie@sha256:74f45fc4c2abe0de9a9acdb4225ffb3e58e6b28f9af2e209afaa8920a3d3b623
 # The devcontainers image tag has no Go patch version, and the image sets
 # GOTOOLCHAIN=local. Take Go from the Dockerfile's golang image, so the
 # patch is pinned and matches go.mod.

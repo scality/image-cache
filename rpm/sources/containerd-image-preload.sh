@@ -35,18 +35,23 @@ MEMBER_MAX_BYTES=1048576
 
 # "name digest" of each image containerd holds complete and unpacked.
 # ctr exits non-zero when any image fails its check but still prints every
-# row, so only a missing header means containerd did not answer.
+# row, so only a missing header means containerd did not answer. With no
+# image at all, it prints nothing, not even the header, and succeeds.
 ready_images() {
-    local table
-    table="$(ctr -n k8s.io images check 2> /dev/null)" || true
+    local table status=0
+    table="$(ctr -n k8s.io images check 2> /dev/null)" || status=$?
+    if [ -z "${table}" ] && [ "${status}" -eq 0 ]; then
+        return 0
+    fi
     [[ "${table}" == REF* ]] || return 1
     awk 'NR > 1 && $4 == "complete" && $NF == "true" { print $1, $3 }' <<< "${table}"
 }
 
 # One file of an archive, cut at MEMBER_MAX_BYTES (a cut file fails to parse
-# or to hash). `--` stops GNU tar from reading a name as an option.
+# or to hash). The name can come from the archive: `--` stops GNU tar from
+# reading it as an option, --no-wildcards from matching `*` or `[` as a glob.
 archive_member() {
-    tar --seek --occurrence=1 -xOf "$1" -- "$2" 2> /dev/null |
+    tar --seek --occurrence=1 --no-wildcards -xOf "$1" -- "$2" 2> /dev/null |
         head -c "${MEMBER_MAX_BYTES}"
 }
 

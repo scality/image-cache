@@ -23,6 +23,7 @@ setup() {
     CTR_CHECK_LOG="$TMP/ctr.check.log"
     CTR_CHECK_FAIL="$TMP/ctr.check.fail"
     CTR_CHECK_PARTIAL="$TMP/ctr.check.partial"
+    CTR_CHECK_EMPTY="$TMP/ctr.check.empty"
     CTR_CONTENT="$TMP/ctr.content"
     CTR_CONTENT_LOG="$TMP/ctr.content.log"
     mkdir -p "$CACHE" "$BIN" "$CTR_CONTENT"
@@ -55,6 +56,10 @@ if [ "\$3 \$4" = "images check" ]; then
     if [ -e "$CTR_CHECK_FAIL" ]; then
         echo "ctr: connection refused" >&2
         exit 1
+    fi
+    # Like the real ctr on a namespace with no image: no header, success.
+    if [ -e "$CTR_CHECK_EMPTY" ]; then
+        exit 0
     fi
     printf 'REF\tTYPE\tDIGEST\tSTATUS\tSIZE\tUNPACKED\n'
     cat "$CTR_IMAGES"
@@ -506,6 +511,15 @@ run_preload_on_journal() {
     [[ "$stderr" == *"Could not list the images containerd has, importing every archive"* ]]
 }
 
+@test "a containerd with no image yet gets every archive imported, with no warning" {
+    make_archive "$CACHE/etcd.tar" registry.example/etcd:3.5 "$(digest 1)"
+    : > "$CTR_CHECK_EMPTY"
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "etcd.tar" "$CTR_LOG"
+    [ -z "$stderr" ]
+}
+
 @test "one image containerd cannot check does not stop the others from being skipped" {
     make_archive "$CACHE/etcd.tar" registry.example/etcd:3.5 "$(digest 1)"
     make_archive "$CACHE/broken.tar" registry.example/broken:1 "$(digest 2)"
@@ -895,6 +909,20 @@ make_raw_docker_archive() {
     [ ! -e "$TMP/pwned" ]
     [ -z "$stderr" ]
     grep -q "evil.tar" "$CTR_LOG"
+}
+
+@test "a docker-archive configuration path is never matched as a glob" {
+    # Read as patterns, both would match config.json, the configuration
+    # containerd holds, and the archives would be skipped.
+    make_raw_docker_archive "$CACHE/star.tar" \
+        '[{"Config":"*","RepoTags":["registry.example/pause:3.10"],"Layers":[]}]'
+    make_raw_docker_archive "$CACHE/bracket.tar" \
+        '[{"Config":"[c]onfig.json","RepoTags":["registry.example/pause:3.10"],"Layers":[]}]'
+    run_preload
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    grep -q "star.tar" "$CTR_LOG"
+    grep -q "bracket.tar" "$CTR_LOG"
 }
 
 @test "a docker-archive with an empty configuration path is imported, quietly" {

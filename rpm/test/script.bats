@@ -949,6 +949,16 @@ make_raw_docker_archive() {
     grep -q "tag.tar" "$CTR_LOG"
 }
 
+@test "a docker-archive tag with a trailing space is imported" {
+    # Read back as "name config", the tag would lose its trailing space and
+    # match an image containerd has: only the white space check imports it.
+    make_raw_docker_archive "$CACHE/trail.tar" \
+        '[{"Config":"config.json","RepoTags":["registry.example/pause:3.10 "],"Layers":[]}]'
+    run_preload
+    [ "$status" -eq 0 ]
+    grep -q "trail.tar" "$CTR_LOG"
+}
+
 @test "a docker-archive with tags that are not a list of strings is imported" {
     make_raw_docker_archive "$CACHE/string.tar" \
         '[{"Config":"config.json","RepoTags":"registry.example/pause:3.10","Layers":[]}]'

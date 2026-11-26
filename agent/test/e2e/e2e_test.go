@@ -569,8 +569,12 @@ func applyImageCache(name, node, registry string) {
 }
 
 // applyImageCacheFrom creates an ImageCache that selects one node and pulls
-// source.
+// source. Its deletion is registered as cleanup, so a spec that fails before
+// deleting it leaves neither the ImageCache nor its directory behind.
 func applyImageCacheFrom(name, node, source string) {
+	DeferCleanup(func() {
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "imagecache", name, "--ignore-not-found"))
+	})
 	cmd := exec.Command("kubectl", "apply", "-f", "-")
 	cmd.Stdin = strings.NewReader(fmt.Sprintf(`apiVersion: image-cache.scality.com/v1alpha1
 kind: ImageCache

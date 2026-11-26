@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -31,6 +32,12 @@ var (
 	ErrCA = errors.New("unusable registry CA")
 	// ErrTLS covers TLS settings that contradict each other.
 	ErrTLS = errors.New("conflicting registry TLS settings")
+	// ErrPlainHTTPRegistry covers a plain HTTP registry entry that is not a
+	// host[:port].
+	ErrPlainHTTPRegistry = errors.New("invalid plain HTTP registry")
+	// ErrUnlistedPlainHTTP covers a plain HTTP request to a registry that is
+	// not listed, refused before it leaves, see httpsOnly.
+	ErrUnlistedPlainHTTP = errors.New("plain HTTP to an unlisted registry refused")
 )
 
 // Image identifies what a source resolved to.
@@ -58,12 +65,13 @@ type Puller interface {
 }
 
 // Remote pulls linux/amd64 images from an OCI registry. The zero value
-// trusts the system CAs only.
+// trusts the system CAs only, and reaches every registry over HTTPS only.
 type Remote struct {
 	// transport is nil for go-containerregistry's default.
 	transport http.RoundTripper
-	// plainHTTP marks every registry as insecure, see TLS.PlainHTTP.
-	plainHTTP bool
+	// plainHTTP lists the registries marked insecure, normalized as
+	// name.Registry.RegistryStr returns them, see TLS.PlainHTTPRegistries.
+	plainHTTP []string
 }
 
 // TLS says how a Remote reaches the registry and checks its certificate.
@@ -73,9 +81,9 @@ type TLS struct {
 	// SkipVerify accepts any certificate. It is meant for a test cluster set
 	// up by hand, never for a node.
 	SkipVerify bool
-	// PlainHTTP lets the pull use plain HTTP. It is for a registry without
-	// TLS, so it excludes the two certificate settings.
-	PlainHTTP bool
+	// PlainHTTPRegistries lists the registries, as host[:port], the pull may
+	// reach over plain HTTP, see agent/README.md for the matching rules.
+	PlainHTTPRegistries []string
 }
 
 // NewRemote returns a Remote that reaches the registry as cfg says. The CA
@@ -83,7 +91,11 @@ type TLS struct {
 func NewRemote(cfg TLS) (Remote, error) {
 	// Without a certificate setting, the library default transport does.
 	if cfg.CAFile == "" && !cfg.SkipVerify {
-		return Remote{plainHTTP: cfg.PlainHTTP}, nil
+		plain, err := plainHTTPRegistries(cfg.PlainHTTPRegistries)
+		if err != nil {
+			return Remote{}, err
+		}
+		return Remote{plainHTTP: plain}, nil
 	}
 	// The library declares its default as an *http.Transport.
 	return newRemote(cfg, remote.DefaultTransport.(*http.Transport))
@@ -96,9 +108,13 @@ func newRemote(cfg TLS, base *http.Transport) (Remote, error) {
 	case cfg.CAFile != "" && cfg.SkipVerify:
 		return Remote{}, errors.Wrap(ErrTLS,
 			errors.WithDetail("a CA file is pointless when certificates are not verified"))
-	case cfg.PlainHTTP && (cfg.CAFile != "" || cfg.SkipVerify):
+	case len(cfg.PlainHTTPRegistries) > 0 && cfg.SkipVerify:
 		return Remote{}, errors.Wrap(ErrTLS,
-			errors.WithDetail("plain HTTP is for a registry without TLS, it takes no certificate setting"))
+			errors.WithDetail("plain HTTP registries are not meant for a test cluster that verifies no certificate"))
+	}
+	plain, err := plainHTTPRegistries(cfg.PlainHTTPRegistries)
+	if err != nil {
+		return Remote{}, err
 	}
 	t := base.Clone()
 	switch {
@@ -111,7 +127,31 @@ func newRemote(cfg TLS, base *http.Transport) (Remote, error) {
 		}
 		t.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
-	return Remote{transport: t}, nil
+	return Remote{transport: t, plainHTTP: plain}, nil
+}
+
+// plainHTTPRegistries checks each entry is a host[:port] and normalizes it the
+// way a parsed reference names its registry, so that docker.io matches what
+// the library calls index.docker.io.
+func plainHTTPRegistries(entries []string) ([]string, error) {
+	var out []string
+	for _, e := range entries {
+		// An empty name would read as the default registry, Docker Hub.
+		if e == "" {
+			return nil, errors.Wrap(ErrPlainHTTPRegistry,
+				errors.WithDetail("an entry is empty, want host[:port]"))
+		}
+		reg, err := name.NewRegistry(e, name.StrictValidation)
+		if err != nil {
+			return nil, errors.Wrap(ErrPlainHTTPRegistry, errors.CausedBy(err),
+				errors.WithDetail("want host[:port], with no scheme and no path"),
+				errors.WithProperty("registry", e))
+		}
+		if s := reg.RegistryStr(); !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out, nil
 }
 
 // caPool returns the system CAs plus those of the PEM file at path. The given
@@ -156,20 +196,26 @@ func (r Remote) Resolve(ctx context.Context, ref string) (Image, error) {
 // open resolves ref to its linux/amd64 image. It reads the manifest and the
 // configuration, never a layer: those are fetched as the stream is read.
 func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
-	var nameOpts []name.Option
-	if r.plainHTTP {
-		// The library then races HTTPS and HTTP, see "Pulling and
-		// extraction" in agent/DESIGN.md.
-		nameOpts = append(nameOpts, name.Insecure)
+	parsed, err := name.ParseReference(ref)
+	if err == nil && slices.Contains(r.plainHTTP, parsed.Context().RegistryStr()) {
+		// The library then races HTTPS and HTTP for this registry alone,
+		// see "Pulling and extraction" in agent/DESIGN.md.
+		parsed, err = name.ParseReference(ref, name.Insecure)
 	}
-	parsed, err := name.ParseReference(ref, nameOpts...)
 	if err != nil {
 		return nil, Image{}, errors.Wrap(ErrReference, errors.CausedBy(err),
 			errors.WithProperty("source", ref))
 	}
-	opts := []remote.Option{remote.WithContext(ctx), remote.WithPlatform(platform)}
-	if r.transport != nil {
-		opts = append(opts, remote.WithTransport(r.transport))
+	// Read at each pull rather than once, so the library default stays the
+	// one in force, as it would be without a transport of ours.
+	next := r.transport
+	if next == nil {
+		next = remote.DefaultTransport
+	}
+	opts := []remote.Option{
+		remote.WithContext(ctx),
+		remote.WithPlatform(platform),
+		remote.WithTransport(httpsOnly{next: next, plain: r.plainHTTP, registry: parsed.Context().RegistryStr()}),
 	}
 	img, err := remote.Image(parsed, opts...)
 	if err != nil {
@@ -178,6 +224,28 @@ func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 	}
 	id, err := identify(img, ref)
 	return img, id, err
+}
+
+// httpsOnly refuses a plain HTTP request to the pulled registry unless it is
+// listed. The library also races HTTP for a private or loopback IP and for a
+// localhost name, whatever the list says, see "Pulling and extraction" in
+// agent/DESIGN.md, so the request is stopped here. A redirect to another host,
+// such as blob storage, is left alone: each blob is checked against its digest.
+type httpsOnly struct {
+	next http.RoundTripper
+	// plain is Remote.plainHTTP: the library builds its URLs on the same
+	// RegistryStr, so a listed registry's requests carry it as their host.
+	plain []string
+	// registry is the RegistryStr of the image being pulled.
+	registry string
+}
+
+// RoundTrip implements http.RoundTripper.
+func (t httpsOnly) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme != "https" && req.URL.Host == t.registry && !slices.Contains(t.plain, req.URL.Host) {
+		return nil, errors.Wrap(ErrUnlistedPlainHTTP, errors.WithProperty("registry", req.URL.Host))
+	}
+	return t.next.RoundTrip(req)
 }
 
 // Tarball reads an image out of a docker archive on the local filesystem,

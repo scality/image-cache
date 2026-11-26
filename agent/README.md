@@ -152,9 +152,23 @@ On a test cluster set up by hand, `--insecure-skip-tls-verify` accepts any
 registry certificate instead. The agent logs a warning at startup. It excludes
 `--ca-file`, and no manifest here sets it: never use it on a real node.
 
-A registry that serves plain HTTP needs `--plain-http`. The agent logs a
-warning at startup. It excludes `--ca-file` and `--insecure-skip-tls-verify`,
-and no manifest here sets it.
+A registry that serves plain HTTP needs `--plain-http-registry=<host[:port]>`,
+repeated for each one. Only the listed registries may be reached over plain
+HTTP: every other one is reached over HTTPS only, and still fails on a bad
+certificate. That includes a registry on a private or loopback IP address or
+a `localhost` name, which the pull library would otherwise also try over plain
+HTTP: list it if it serves plain HTTP. Write each entry as the `ImageCache`
+sources name the registry:
+
+- by the same host, an IP if they use an IP and a name if they use a name;
+- with the port they carry, and with no port if they carry none;
+- with no scheme and no path: `10.0.0.1:5000`, not `http://10.0.0.1:5000`.
+
+The match is exact, so an entry written another way does not apply and the
+pull fails on `HTTP response to HTTPS client`. The agent logs the list with a
+warning at startup. It goes with `--ca-file`, which covers the registries that
+serve TLS, but not with `--insecure-skip-tls-verify`. No manifest here sets
+it.
 
 Leader election is deliberately absent. Every agent converges the node it runs
 on, so there is nothing to elect a leader for.

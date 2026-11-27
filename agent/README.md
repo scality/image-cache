@@ -170,6 +170,14 @@ warning at startup. It goes with `--ca-file`, which covers the registries that
 serve TLS, but not with `--insecure-skip-tls-verify`. No manifest here sets
 it.
 
+`--mirror=<host[:port]>` names a registry every source is pulled from first,
+as a containerd mirror is, so the `ImageCache` sources keep the real image
+name, such as `ghcr.io/scality/x:1.0`. When the mirror fails or misses a
+layer, the agent pulls from the registry the source names and logs the
+mirror's failure. The mirror takes `--ca-file` like any registry, and needs
+`--plain-http-registry` if it serves plain HTTP. How it works and what it
+trusts is in "Image pulling" in [DESIGN.md](DESIGN.md).
+
 Leader election is deliberately absent. Every agent converges the node it runs
 on, so there is nothing to elect a leader for.
 

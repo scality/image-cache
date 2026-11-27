@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/partial"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/scality/go-errors"
@@ -218,7 +219,7 @@ var platform = v1.Platform{OS: "linux", Architecture: "amd64"}
 
 // Pull implements Puller.
 func (r Remote) Pull(ctx context.Context, ref string) (io.ReadCloser, Image, error) {
-	img, id, err := r.open(ctx, ref)
+	img, id, err := r.open(ctx, ref, true)
 	if err != nil {
 		return nil, Image{}, err
 	}
@@ -227,7 +228,7 @@ func (r Remote) Pull(ctx context.Context, ref string) (io.ReadCloser, Image, err
 
 // Resolve implements Puller.
 func (r Remote) Resolve(ctx context.Context, ref string) (Image, error) {
-	_, id, err := r.open(ctx, ref)
+	_, id, err := r.open(ctx, ref, false)
 	return id, err
 }
 
@@ -235,8 +236,9 @@ func (r Remote) Resolve(ctx context.Context, ref string) (Image, error) {
 // configuration, never a layer: those are fetched as the stream is read.
 //
 // With a mirror, the mirror is tried first and the registry ref names next.
-// See "Image pulling" in agent/DESIGN.md.
-func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
+// For a pull, the mirror must also answer a HEAD for each layer: a resolve
+// reads no layer, so it does not ask. See "Image pulling" in agent/DESIGN.md.
+func (r Remote) open(ctx context.Context, ref string, layers bool) (v1.Image, Image, error) {
 	parsed, err := r.parse(ref)
 	if err != nil {
 		return nil, Image{}, err
@@ -247,6 +249,9 @@ func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 	}
 	onMirror := r.onMirror(parsed)
 	img, id, mirrorErr := r.openFrom(ctx, onMirror, onMirror.String(), namespace(upstream))
+	if mirrorErr == nil && layers {
+		mirrorErr = holdsLayers(img, onMirror.String())
+	}
 	// A cancelled pull would fail the same way on the registry.
 	if mirrorErr == nil || ctx.Err() != nil {
 		return img, id, mirrorErr
@@ -258,6 +263,33 @@ func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 			errors.WithProperty("source", ref), errors.WithProperty("mirror", r.mirror.RegistryStr()))
 	}
 	return img, id, nil
+}
+
+// holdsLayers checks that the mirror has every layer of img, with one HEAD
+// request per layer.
+func holdsLayers(img v1.Image, ref string) error {
+	layers, err := img.Layers()
+	if err != nil {
+		return errors.Wrap(ErrPull, errors.CausedBy(err),
+			errors.WithDetail("listing the layers"), errors.WithProperty("source", ref))
+	}
+	for _, l := range layers {
+		ok, err := partial.Exists(l)
+		if err == nil && ok {
+			continue
+		}
+		opts := []errors.Option{errors.WithDetail("the mirror misses a layer"), errors.WithProperty("source", ref)}
+		if d, derr := l.Digest(); derr == nil {
+			opts = append(opts, errors.WithProperty("layer", d.String()))
+		}
+		// A 404 comes back as false with no error, and an empty cause
+		// would make the message panic.
+		if err != nil {
+			opts = append(opts, errors.CausedBy(err))
+		}
+		return errors.Wrap(ErrPull, opts...)
+	}
+	return nil
 }
 
 // onMirror returns parsed with its registry replaced by the mirror. It is

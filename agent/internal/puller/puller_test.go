@@ -1590,6 +1590,12 @@ type mirrorTest struct {
 	srv  *httptest.Server
 	mu   sync.Mutex
 	ns   []string
+	// broken is a blob digest answered with brokenStatus, as a registry
+	// that lost it or fails on it would.
+	broken       string
+	brokenStatus int
+	// heads lists the paths of the HEAD requests received.
+	heads []string
 	// onRequest, when set, runs on each request before it is served.
 	onRequest func()
 }
@@ -1603,10 +1609,17 @@ func newMirrorTest(t *testing.T) *mirrorTest {
 	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		m.ns = append(m.ns, r.URL.Query().Get("ns"))
-		hook := m.onRequest
+		if r.Method == http.MethodHead {
+			m.heads = append(m.heads, r.URL.Path)
+		}
+		broken, status, hook := m.broken, m.brokenStatus, m.onRequest
 		m.mu.Unlock()
 		if hook != nil {
 			hook()
+		}
+		if broken != "" && strings.HasSuffix(r.URL.Path, "/blobs/"+broken) {
+			w.WriteHeader(status)
+			return
 		}
 		reg.ServeHTTP(w, r)
 	}))
@@ -1621,13 +1634,13 @@ func newMirrorTest(t *testing.T) *mirrorTest {
 func (m *mirrorTest) push(t *testing.T, path string, img v1.Image) string {
 	t.Helper()
 	m.mu.Lock()
-	before := len(m.ns)
+	before, beforeHeads := len(m.ns), len(m.heads)
 	m.mu.Unlock()
 	if err := crane.Push(img, strings.TrimPrefix(m.srv.URL, "http://")+path); err != nil {
 		t.Fatal(err)
 	}
 	m.mu.Lock()
-	m.ns = m.ns[:before]
+	m.ns, m.heads = m.ns[:before], m.heads[:beforeHeads]
 	m.mu.Unlock()
 	d, err := img.Digest()
 	if err != nil {
@@ -1797,6 +1810,95 @@ func TestNewRemoteRejectsAMirrorThatIsNotAHost(t *testing.T) {
 	}
 }
 
+// breakLayer makes the mirror answer status for the only layer of img.
+func (m *mirrorTest) breakLayer(t *testing.T, img v1.Image, status int) string {
+	t.Helper()
+	layers, err := img.Layers()
+	if err != nil || len(layers) != 1 {
+		t.Fatalf("want one layer, got %d (%v)", len(layers), err)
+	}
+	d, err := layers[0].Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.broken, m.brokenStatus = d.String(), status
+	m.mu.Unlock()
+	return d.String()
+}
+
+// A mirror that holds the manifest and the configuration but misses a layer
+// is passed over before the layers stream, for a 404 as for a server error.
+func TestRemotePullFallsBackWhenTheMirrorMissesALayer(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+			img := workerImage(t)
+			mirror.push(t, workerRefPath, img)
+			digest := upstream.push(t, workerRefPath, img)
+			layer := mirror.breakLayer(t, img, status)
+			r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+			id, err := pullAll(r, upstream.host+workerRefPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if id.Digest != digest {
+				t.Errorf("digest = %s, want %s", id.Digest, digest)
+			}
+			mirror.mu.Lock()
+			headed := slices.ContainsFunc(mirror.heads, func(p string) bool { return strings.HasSuffix(p, layer) })
+			mirror.mu.Unlock()
+			if !headed {
+				t.Errorf("the mirror received no HEAD for %s: %v", layer, mirror.heads)
+			}
+			if len(upstream.seen()) == 0 {
+				t.Error("the registry was not tried")
+			}
+		})
+	}
+}
+
+func TestRemotePullNamesTheLayerTheMirrorMisses(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	img := workerImage(t)
+	mirror.push(t, workerRefPath, img)
+	layer := mirror.breakLayer(t, img, http.StatusNotFound)
+	r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+	_, err := pullAll(r, upstream.host+workerRefPath)
+	if !errors.Is(err, ErrPull) {
+		t.Fatalf("err = %v, want ErrPull", err)
+	}
+	for _, want := range []string{"the mirror misses a layer", layer, "NAME_UNKNOWN"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to carry %q", err, want)
+		}
+	}
+}
+
+// Every HEAD the mirror receives carries ns, like the other requests.
+func TestRemotePullChecksTheLayersWithNS(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	mirror.push(t, workerRefPath, workerImage(t))
+	r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+	if _, err := pullAll(r, upstream.host+workerRefPath); err != nil {
+		t.Fatal(err)
+	}
+	mirror.mu.Lock()
+	blobHeads := slices.ContainsFunc(mirror.heads, func(p string) bool { return strings.Contains(p, "/blobs/") })
+	mirror.mu.Unlock()
+	if !blobHeads {
+		t.Errorf("Pull sent no HEAD for a layer to the mirror: %v", mirror.heads)
+	}
+	for _, ns := range mirror.seen() {
+		if ns != upstream.host {
+			t.Errorf("the mirror received ns=%q, want %q", ns, upstream.host)
+		}
+	}
+}
+
 // counting counts the requests to host that reach the transport, sent or not:
 // a cancelled context stops a request before the server sees it.
 type counting struct {
@@ -1873,6 +1975,30 @@ func TestOnMirrorMarksAListedMirrorInsecure(t *testing.T) {
 	got := mirrored(t, nil, short, short).onMirror(parsed)
 	if scheme := got.Context().Scheme(); scheme != "http" {
 		t.Errorf("scheme = %q, want http", scheme)
+	}
+}
+
+// Resolve reads no layer, so it does not check the mirror holds them: an
+// adoption check that the mirror's configuration answers needs no registry.
+func TestRemoteResolveTrustsAMirrorMissingALayer(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	img := workerImage(t)
+	digest := mirror.push(t, workerRefPath, img)
+	mirror.breakLayer(t, img, http.StatusNotFound)
+	upstream.srv.Close()
+	r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+	id, err := r.Resolve(context.Background(), upstream.host+workerRefPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Digest != digest {
+		t.Errorf("digest = %s, want %s", id.Digest, digest)
+	}
+	mirror.mu.Lock()
+	defer mirror.mu.Unlock()
+	if slices.ContainsFunc(mirror.heads, func(p string) bool { return strings.Contains(p, "/blobs/") }) {
+		t.Errorf("Resolve sent a HEAD for a layer: %v", mirror.heads)
 	}
 }
 

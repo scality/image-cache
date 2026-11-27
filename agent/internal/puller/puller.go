@@ -91,11 +91,7 @@ type TLS struct {
 func NewRemote(cfg TLS) (Remote, error) {
 	// Without a certificate setting, the library default transport does.
 	if cfg.CAFile == "" && !cfg.SkipVerify {
-		plain, err := plainHTTPRegistries(cfg.PlainHTTPRegistries)
-		if err != nil {
-			return Remote{}, err
-		}
-		return Remote{plainHTTP: plain}, nil
+		return withRegistries(Remote{}, cfg)
 	}
 	// The library declares its default as an *http.Transport.
 	return newRemote(cfg, remote.DefaultTransport.(*http.Transport))
@@ -112,10 +108,6 @@ func newRemote(cfg TLS, base *http.Transport) (Remote, error) {
 		return Remote{}, errors.Wrap(ErrTLS,
 			errors.WithDetail("plain HTTP registries are not meant for a test cluster that verifies no certificate"))
 	}
-	plain, err := plainHTTPRegistries(cfg.PlainHTTPRegistries)
-	if err != nil {
-		return Remote{}, err
-	}
 	t := base.Clone()
 	switch {
 	case cfg.SkipVerify:
@@ -127,7 +119,18 @@ func newRemote(cfg TLS, base *http.Transport) (Remote, error) {
 		}
 		t.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
-	return Remote{transport: t, plainHTTP: plain}, nil
+	return withRegistries(Remote{transport: t}, cfg)
+}
+
+// withRegistries checks and normalizes the registries cfg names, and sets
+// them on r.
+func withRegistries(r Remote, cfg TLS) (Remote, error) {
+	plain, err := plainHTTPRegistries(cfg.PlainHTTPRegistries)
+	if err != nil {
+		return Remote{}, err
+	}
+	r.plainHTTP = plain
+	return r, nil
 }
 
 // plainHTTPRegistries checks each entry is a host[:port] and normalizes it the

@@ -82,6 +82,15 @@ const syncedName = "imagecache-e2e-synced"
 // ClusterIP, a private address the library also tries over plain HTTP.
 const plainIPName = "imagecache-e2e-plain-ip"
 
+// mirroredName, partialName and fallbackName are the ImageCaches pulled with
+// --mirror: the first from the mirror, the second from the registry while the
+// mirror misses a layer, the third from the registry once the mirror is down.
+const (
+	mirroredName = "imagecache-e2e-mirrored"
+	partialName  = "imagecache-e2e-partial"
+	fallbackName = "imagecache-e2e-fallback"
+)
+
 // tlsName is the ImageCache that pulls from the registry signed by a
 // throwaway CA, to exercise --ca-file through the shipped patch.
 const tlsName = "imagecache-e2e-tls"
@@ -415,6 +424,82 @@ spec:
 			}).Should(BeFalse())
 		})
 
+		It("should pull through the mirror first, then from the registry when the mirror misses a layer or is down", func() {
+			deployRegistry("mirror", "")
+			deployRegistry("upstream", "")
+			// The registry has nothing yet: a pull that works went through
+			// the mirror.
+			digest := pushCarrier("mirror", nil)
+
+			By("restarting the agent with the mirror")
+			patchAgent("--type=json", fmt.Sprintf(`-p=[`+
+				`{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--plain-http-registry=%[1]s"},`+
+				`{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--plain-http-registry=%[2]s"},`+
+				`{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--mirror=%[1]s"}]`,
+				registryHost("mirror"), registryHost("upstream")))
+
+			worker := utils.WorkerNode()
+			expectSynced := func(name string) {
+				By("waiting for " + name + " to be synced on the worker")
+				Eventually(func(g Gomega) {
+					labels, err := nodeLabels(worker)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(labels).To(HaveKeyWithValue(labelKey(name), "synced"))
+				}).Should(Succeed())
+				expectExtracted(worker, cachePath+"/"+name, digest)
+			}
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "imagecache", mirroredName, partialName, fallbackName,
+					"--ignore-not-found")
+				_, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred(), "Failed to delete the ImageCaches")
+			})
+
+			By("creating an ImageCache whose source names the registry")
+			applyImageCache(mirroredName, worker, "upstream")
+			expectSynced(mirroredName)
+
+			By("pushing the image to the registry and deleting its layer from the mirror")
+			Expect(pushCarrier("upstream", nil)).To(Equal(digest))
+			layers, err := carrierImage(carrierBody).Layers()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(layers).To(HaveLen(1))
+			layer, err := layers[0].Digest()
+			Expect(err).NotTo(HaveOccurred())
+			local := portForward(registryNamespace, "svc/mirror", 5000)
+			req, err := http.NewRequest(http.MethodDelete, "http://"+local+"/v2/e2e/carrier/blobs/"+layer.String(), nil)
+			Expect(err).NotTo(HaveOccurred())
+			resp, err := http.DefaultClient.Do(req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Body.Close()).To(Succeed())
+			Expect(resp.StatusCode).To(Equal(http.StatusAccepted), "The mirror did not delete the layer")
+
+			By("creating an ImageCache the mirror can resolve but not serve whole")
+			applyImageCache(partialName, worker, "upstream")
+			expectSynced(partialName)
+			By("checking that the agent logged the mirror it passed over")
+			Eventually(func() (string, error) {
+				cmd := exec.Command("kubectl", "logs", "-l", agentSelector, "-n", namespace, "--tail=-1")
+				return utils.Run(cmd)
+			}).Should(And(ContainSubstring("Mirror failed, resolved the image from the registry"),
+				ContainSubstring("the mirror misses a layer")))
+
+			By("stopping the mirror")
+			cmd := exec.Command("kubectl", "scale", "deployment/mirror", "-n", registryNamespace, "--replicas=0")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to stop the mirror")
+			// Both hold the same digest: a pod still terminating could serve
+			// the pull and hide a broken fallback.
+			cmd = exec.Command("kubectl", "wait", "--for=delete", "pod", "-l", "app=mirror",
+				"-n", registryNamespace, "--timeout=2m")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "The mirror did not stop")
+
+			By("creating a second ImageCache, pulled from the registry")
+			applyImageCache(fallbackName, worker, "upstream")
+			expectSynced(fallbackName)
+		})
+
 		It("should refuse a registry signed by an unknown CA, then pull once the registry CA patch is applied", func() {
 			ca, cert, key := newRegistryCerts("registry-tls." + registryNamespace + ".svc.cluster.local")
 			deployRegistry("registry-tls", tlsSecret("registry-tls", cert, key))
@@ -546,7 +631,7 @@ func patchAgent(args ...string) {
 // allowPlainHTTP restarts the agent with the named in-cluster registry listed
 // in --plain-http-registry, written as applyImageCache's sources name it.
 func allowPlainHTTP(registry string) {
-	listPlainHTTP(fmt.Sprintf("%s.%s.svc.cluster.local:5000", registry, registryNamespace))
+	listPlainHTTP(registryHost(registry))
 }
 
 // listPlainHTTP restarts the agent with host listed in --plain-http-registry.
@@ -562,10 +647,16 @@ func waitAgentRollout() {
 	Expect(err).NotTo(HaveOccurred(), "The agent did not roll out")
 }
 
+// registryHost is the host[:port] of the named in-cluster registry, as the
+// sources and the agent flags name it.
+func registryHost(registry string) string {
+	return fmt.Sprintf("%s.%s.svc.cluster.local:5000", registry, registryNamespace)
+}
+
 // applyImageCache creates an ImageCache that selects one node and pulls the
 // carrier image from the named in-cluster registry.
 func applyImageCache(name, node, registry string) {
-	applyImageCacheFrom(name, node, fmt.Sprintf("%s.%s.svc.cluster.local:5000/e2e/carrier:1", registry, registryNamespace))
+	applyImageCacheFrom(name, node, registryHost(registry)+"/e2e/carrier:1")
 }
 
 // applyImageCacheFrom creates an ImageCache that selects one node and pulls
@@ -615,13 +706,18 @@ func expectExtracted(node, dir string, digest v1.Hash) {
 
 // deployRegistry deploys a single-replica registry and its Service, both
 // called name, and waits for it. Given a TLS Secret manifest from tlsSecret,
-// it applies it and the registry serves HTTPS with that certificate.
+// it applies it and the registry serves HTTPS with that certificate. Deletes
+// are enabled, so a spec can make a registry lose a blob without restarting
+// it, which would empty its storage.
 func deployRegistry(name, secret string) {
 	By("deploying the " + name + " registry in the cluster")
-	tlsEnv, tlsMount, tlsVolume, scheme := "", "", "", "HTTP"
-	if secret != "" {
-		tlsEnv = `
+	tlsMount, tlsVolume, scheme := "", "", "HTTP"
+	env := `
           env:
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"`
+	if secret != "" {
+		env += `
             - name: REGISTRY_HTTP_TLS_CERTIFICATE
               value: /certs/tls.crt
             - name: REGISTRY_HTTP_TLS_KEY
@@ -678,7 +774,7 @@ spec:
     app: %[2]s
   ports:
     - port: 5000
-`, registryNamespace, name, secret, registryImage, tlsEnv, tlsMount, scheme, tlsVolume)
+`, registryNamespace, name, secret, registryImage, env, tlsMount, scheme, tlsVolume)
 	cmd := exec.Command("kubectl", "apply", "-f", "-")
 	cmd.Stdin = strings.NewReader(manifest)
 	_, err := utils.Run(cmd)

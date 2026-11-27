@@ -27,6 +27,8 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -1895,6 +1897,48 @@ func TestRemotePullChecksTheLayersWithNS(t *testing.T) {
 	for _, ns := range mirror.seen() {
 		if ns != upstream.host {
 			t.Errorf("the mirror received ns=%q, want %q", ns, upstream.host)
+		}
+	}
+}
+
+// logged returns a context whose logr logger appends each line to the
+// returned buffer.
+func logged() (context.Context, *strings.Builder) {
+	var buf strings.Builder
+	var mu sync.Mutex
+	l := funcr.New(func(_, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		buf.WriteString(args + "\n")
+	}, funcr.Options{})
+	return logr.NewContext(context.Background(), l), &buf
+}
+
+// A mirror passed over is logged, since the pull itself succeeds. A mirror
+// that answers is not.
+func TestRemotePullLogsAMirrorItPassedOver(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	img := workerImage(t)
+	mirror.push(t, workerRefPath, img)
+	upstream.push(t, workerRefPath, img)
+	r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+	ctx, buf := logged()
+	if _, err := r.Resolve(ctx, upstream.host+workerRefPath); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a mirror that answered was logged: %s", buf.String())
+	}
+
+	mirror.srv.Close()
+	ctx, buf = logged()
+	if _, err := r.Resolve(ctx, upstream.host+workerRefPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Mirror failed", mirror.host, "connection refused"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("log = %q, want it to carry %q", buf.String(), want)
 		}
 	}
 }

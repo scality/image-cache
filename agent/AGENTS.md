@@ -88,7 +88,9 @@ converges that node for real.
   of the calls, key-value pairs balanced, not the wording, so follow
   Kubernetes' own convention for messages: a capital first letter, no trailing
   period, the object type named. The reconciler logs outcomes, the packages it
-  calls return errors.
+  calls return errors. One exception: the puller logs a mirror it passed over
+  when the registry served the image, with the logr logger of the context.
+  The pull worked, so there is no error to return.
 - **Node labels**: patched, never updated wholesale. Several agents write the
   same Node object at once, and everything they did not touch has to survive.
 - **Vendor neutrality**: this code knows about Kubernetes and containerd, never

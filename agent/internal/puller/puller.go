@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/partial"
@@ -262,6 +263,10 @@ func (r Remote) open(ctx context.Context, ref string, layers bool) (v1.Image, Im
 			errors.WithDetail("neither the mirror nor the registry served the image"),
 			errors.WithProperty("source", ref), errors.WithProperty("mirror", r.mirror.RegistryStr()))
 	}
+	// Logged, not returned: the registry answered. Without it, a mirror that
+	// always fails goes unnoticed until the node loses the registry too.
+	logr.FromContextOrDiscard(ctx).Info("Mirror failed, resolved the image from the registry",
+		"source", ref, "mirror", r.mirror.RegistryStr(), "reason", mirrorErr.Error())
 	return img, id, nil
 }
 

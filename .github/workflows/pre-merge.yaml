@@ -107,6 +107,20 @@ jobs:
           EL: ${{ matrix.el }}
         run: make -C rpm test EL="$EL"
 
+  go-generated:
+    # On a Renovate branch, pushes the regenerated code itself.
+    uses: scality/workflows/.github/workflows/go-generated.yaml@1c3bb83b992d0a512c08755606ee6439b26c463b # v2.13.0
+    secrets:
+      ACTIONS_APP_PRIVATE_KEY: ${{ secrets.ACTIONS_APP_PRIVATE_KEY }}
+    with:
+      working-directory: agent
+      commands: |
+        go mod tidy
+        go generate ./...
+        make manifests generate
+      push-to-renovate-branches: true
+      actions-app-id: ${{ vars.ACTIONS_APP_ID }}
+
   pre-merge:
     name: Pre Merge
     # Single check for rulesets to require: GitHub reports one check per job, never one per workflow
@@ -114,6 +128,7 @@ jobs:
     if: always()
     needs:
       - lint
+      - go-generated
       - test
       - image
       - e2e

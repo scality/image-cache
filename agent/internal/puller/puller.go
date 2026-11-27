@@ -5,11 +5,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -38,6 +41,8 @@ var (
 	// ErrUnlistedPlainHTTP covers a plain HTTP request to a registry that is
 	// not listed, refused before it leaves, see httpsOnly.
 	ErrUnlistedPlainHTTP = errors.New("plain HTTP to an unlisted registry refused")
+	// ErrMirror covers a mirror that is not a host[:port].
+	ErrMirror = errors.New("invalid registry mirror")
 )
 
 // Image identifies what a source resolved to.
@@ -72,6 +77,8 @@ type Remote struct {
 	// plainHTTP lists the registries marked insecure, normalized as
 	// name.Registry.RegistryStr returns them, see TLS.PlainHTTPRegistries.
 	plainHTTP []string
+	// mirror is TLS.Mirror, marked insecure when plainHTTP lists it, or nil.
+	mirror *name.Registry
 }
 
 // TLS says how a Remote reaches the registry and checks its certificate.
@@ -84,6 +91,11 @@ type TLS struct {
 	// PlainHTTPRegistries lists the registries, as host[:port], the pull may
 	// reach over plain HTTP, see agent/README.md for the matching rules.
 	PlainHTTPRegistries []string
+	// Mirror is a registry, as host[:port], tried before the registry each
+	// reference names, see "Image pulling" in agent/DESIGN.md. The settings
+	// above apply to it like to any registry: it is reached over plain HTTP
+	// only if it is listed in PlainHTTPRegistries.
+	Mirror string
 }
 
 // NewRemote returns a Remote that reaches the registry as cfg says. The CA
@@ -125,11 +137,34 @@ func newRemote(cfg TLS, base *http.Transport) (Remote, error) {
 // withRegistries checks and normalizes the registries cfg names, and sets
 // them on r.
 func withRegistries(r Remote, cfg TLS) (Remote, error) {
+	// The mirror first: imagecachectl copies it into the plain HTTP list,
+	// and a bad one is better named as the mirror.
+	var mirror name.Registry
+	if cfg.Mirror != "" {
+		var err error
+		mirror, err = name.NewRegistry(cfg.Mirror, name.StrictValidation)
+		if err != nil {
+			return Remote{}, errors.Wrap(ErrMirror, errors.CausedBy(err),
+				errors.WithDetail("want host[:port], with no scheme and no path"),
+				errors.WithProperty("mirror", cfg.Mirror))
+		}
+	}
 	plain, err := plainHTTPRegistries(cfg.PlainHTTPRegistries)
 	if err != nil {
 		return Remote{}, err
 	}
 	r.plainHTTP = plain
+	if cfg.Mirror != "" {
+		// Insecure is an option of the parse, so a listed mirror is parsed
+		// again with it.
+		if slices.Contains(plain, mirror.RegistryStr()) {
+			if mirror, err = name.NewRegistry(cfg.Mirror, name.StrictValidation, name.Insecure); err != nil {
+				return Remote{}, errors.Wrap(ErrMirror, errors.CausedBy(err),
+					errors.WithProperty("mirror", cfg.Mirror))
+			}
+		}
+		r.mirror = &mirror
+	}
 	return r, nil
 }
 
@@ -198,7 +233,48 @@ func (r Remote) Resolve(ctx context.Context, ref string) (Image, error) {
 
 // open resolves ref to its linux/amd64 image. It reads the manifest and the
 // configuration, never a layer: those are fetched as the stream is read.
+//
+// With a mirror, the mirror is tried first and the registry ref names next.
+// See "Image pulling" in agent/DESIGN.md.
 func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
+	parsed, err := r.parse(ref)
+	if err != nil {
+		return nil, Image{}, err
+	}
+	upstream := parsed.Context().RegistryStr()
+	if r.mirror == nil || r.mirror.RegistryStr() == upstream {
+		return r.openFrom(ctx, parsed, ref, "")
+	}
+	onMirror := r.onMirror(parsed)
+	img, id, mirrorErr := r.openFrom(ctx, onMirror, onMirror.String(), namespace(upstream))
+	// A cancelled pull would fail the same way on the registry.
+	if mirrorErr == nil || ctx.Err() != nil {
+		return img, id, mirrorErr
+	}
+	img, id, err = r.openFrom(ctx, parsed, ref, "")
+	if err != nil {
+		return nil, Image{}, errors.Wrap(ErrPull, errors.CausedBy(stderrors.Join(mirrorErr, err)),
+			errors.WithDetail("neither the mirror nor the registry served the image"),
+			errors.WithProperty("source", ref), errors.WithProperty("mirror", r.mirror.RegistryStr()))
+	}
+	return img, id, nil
+}
+
+// onMirror returns parsed with its registry replaced by the mirror. It is
+// built from the registry rather than parsed from a string: a mirror named
+// with no dot and no port, such as a short host name, would read as the
+// first path element of a Docker Hub repository.
+func (r Remote) onMirror(parsed name.Reference) name.Reference {
+	repo := r.mirror.Repo(parsed.Context().RepositoryStr())
+	if _, ok := parsed.(name.Digest); ok {
+		return repo.Digest(parsed.Identifier())
+	}
+	return repo.Tag(parsed.Identifier())
+}
+
+// parse parses ref, marked insecure when its registry is listed for plain
+// HTTP.
+func (r Remote) parse(ref string) (name.Reference, error) {
 	parsed, err := name.ParseReference(ref)
 	if err == nil && slices.Contains(r.plainHTTP, parsed.Context().RegistryStr()) {
 		// The library then races HTTPS and HTTP for this registry alone,
@@ -206,19 +282,29 @@ func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 		parsed, err = name.ParseReference(ref, name.Insecure)
 	}
 	if err != nil {
-		return nil, Image{}, errors.Wrap(ErrReference, errors.CausedBy(err),
+		return nil, errors.Wrap(ErrReference, errors.CausedBy(err),
 			errors.WithProperty("source", ref))
 	}
+	return parsed, nil
+}
+
+// openFrom resolves parsed. A non-empty ns is sent to the mirror, see
+// withNamespace.
+func (r Remote) openFrom(ctx context.Context, parsed name.Reference, ref, ns string) (v1.Image, Image, error) {
 	// Read at each pull rather than once, so the library default stays the
 	// one in force, as it would be without a transport of ours.
 	next := r.transport
 	if next == nil {
 		next = remote.DefaultTransport
 	}
+	var t http.RoundTripper = httpsOnly{next: next, plain: r.plainHTTP, registry: parsed.Context().RegistryStr()}
+	if ns != "" {
+		t = withNamespace{next: t, host: r.mirror.RegistryStr(), ns: ns}
+	}
 	opts := []remote.Option{
 		remote.WithContext(ctx),
 		remote.WithPlatform(platform),
-		remote.WithTransport(httpsOnly{next: next, plain: r.plainHTTP, registry: parsed.Context().RegistryStr()}),
+		remote.WithTransport(t),
 	}
 	img, err := remote.Image(parsed, opts...)
 	if err != nil {
@@ -227,6 +313,41 @@ func (r Remote) open(ctx context.Context, ref string) (v1.Image, Image, error) {
 	}
 	id, err := identify(img, ref)
 	return img, id, err
+}
+
+// namespace is the ns a mirror receives for a registry. Docker Hub goes by
+// docker.io there, as containerd sends it, not by the host the library uses.
+func namespace(registry string) string {
+	if registry == name.DefaultRegistry {
+		return "docker.io"
+	}
+	return registry
+}
+
+// withNamespace adds the ns query parameter to the registry API requests sent
+// to the mirror, under /v2/. It names the registry the image comes from, the
+// way containerd passes it to a mirror. Any other request, such as one to a
+// token server or a signed URL the mirror redirects to, goes out unchanged.
+type withNamespace struct {
+	next     http.RoundTripper
+	host, ns string
+}
+
+// RoundTrip implements http.RoundTripper.
+func (t withNamespace) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host != t.host || !strings.HasPrefix(req.URL.Path, "/v2/") {
+		return t.next.RoundTrip(req)
+	}
+	// A RoundTripper must not change the request it is given. The query is
+	// appended to rather than encoded again, which would reorder it.
+	req = req.Clone(req.Context())
+	ns := "ns=" + url.QueryEscape(t.ns)
+	if req.URL.RawQuery == "" {
+		req.URL.RawQuery = ns
+	} else {
+		req.URL.RawQuery += "&" + ns
+	}
+	return t.next.RoundTrip(req)
 }
 
 // httpsOnly refuses a plain HTTP request to the pulled registry unless it is

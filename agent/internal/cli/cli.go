@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	imgname "github.com/google/go-containerregistry/pkg/name"
 	"github.com/scality/go-errors"
 	"github.com/spf13/cobra"
@@ -43,7 +45,11 @@ const importLong = `Fills the image cache with the archives a boot cache image c
 <source> is either the path of a docker archive or the reference of an image
 in a registry. It is a path when it starts with a separator or a dot, or ends
 in .tar, and a reference otherwise: the shape of what you pass decides, not
-what is on disk.`
+what is on disk.
+
+--plain-http excludes --insecure-skip-tls-verify. It also excludes --ca-file,
+unless --mirror is given: the plain HTTP then goes to the mirror, and the CA
+covers the registry the source names.`
 
 const importExample = `  imagecachectl import --name worker-1-0-0 registry.example.com/boot-cache-worker:1.0.0
   imagecachectl import --name worker-1-0-0 /mnt/iso/images/boot-cache-worker.tar
@@ -52,10 +58,10 @@ const importExample = `  imagecachectl import --name worker-1-0-0 registry.examp
 // Run executes the command line and returns the process exit code: 0 on
 // success, ExitInterrupted when the context was cancelled, 1 otherwise.
 func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
-	var name, cachePath, caFile string
+	var name, cachePath, caFile, mirror string
 	var skipVerify, plainHTTP bool
 	importCmd := &cobra.Command{
-		Use:     "import --name <resource> [--cache-path <dir>] [--ca-file <file> | --insecure-skip-tls-verify | --plain-http] <source>",
+		Use:     "import --name <resource> [--cache-path <dir>] [--mirror <host[:port]>] [--ca-file <file> | --insecure-skip-tls-verify] [--plain-http] <source>",
 		Short:   "Fill the image cache from a registry or a docker archive",
 		Long:    importLong,
 		Example: importExample,
@@ -74,14 +80,16 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 			if caFile != "" && skipVerify {
 				return errors.New("--ca-file and --insecure-skip-tls-verify exclude each other")
 			}
-			if plainHTTP && caFile != "" {
+			// With a mirror, --plain-http goes to the mirror and --ca-file
+			// covers the source's registry, so the two go together.
+			if plainHTTP && caFile != "" && mirror == "" {
 				return errors.New("--ca-file and --plain-http exclude each other")
 			}
 			if plainHTTP && skipVerify {
 				return errors.New("--insecure-skip-tls-verify and --plain-http exclude each other")
 			}
 			err := do(cmd.Context(), cachePath, name, args[0],
-				puller.TLS{CAFile: caFile, SkipVerify: skipVerify}, plainHTTP, out, errOut)
+				puller.TLS{CAFile: caFile, SkipVerify: skipVerify, Mirror: mirror}, plainHTTP, out, errOut)
 			// An interrupted run is not a failure to diagnose: the extraction
 			// publishes by rename, so nothing half written is left behind.
 			if errors.Is(err, context.Canceled) {
@@ -98,7 +106,9 @@ func Run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	importCmd.Flags().BoolVar(&skipVerify, "insecure-skip-tls-verify", false,
 		"accept any registry certificate, for a test cluster set up by hand only")
 	importCmd.Flags().BoolVar(&plainHTTP, "plain-http", false,
-		"allow plain HTTP to the registry, for a registry without TLS")
+		"allow plain HTTP to the registry, for a registry without TLS: to the mirror when --mirror is given")
+	importCmd.Flags().StringVar(&mirror, "mirror", "",
+		"registry, as `host[:port]`, to pull the source from first, before the registry it names")
 	_ = importCmd.MarkFlagRequired("name")
 
 	root := &cobra.Command{
@@ -149,6 +159,10 @@ func validate(name, cachePath string) error {
 func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, plainHTTP bool,
 	out, errOut io.Writer) error {
 	store := cache.Store{}
+	// The puller logs a mirror it passed over. On the host, that is a warning.
+	ctx = logr.NewContext(ctx, funcr.New(func(_, args string) {
+		printf(errOut, "imagecachectl: warning: %s\n", args)
+	}, funcr.Options{RenderBuiltinsHook: dropLevel}))
 
 	// Before the cache state, so that a CA that cannot be used is reported
 	// on every run, including one that would have found the resource
@@ -162,7 +176,11 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, pla
 			printf(errOut, "imagecachectl: warning: the registry certificate is not verified\n")
 		}
 		if plainHTTP {
-			printf(errOut, "imagecachectl: warning: the registry may be reached over plain HTTP\n")
+			target := "the registry"
+			if tls.Mirror != "" {
+				target = "the mirror"
+			}
+			printf(errOut, "imagecachectl: warning: %s may be reached over plain HTTP\n", target)
 		}
 	}
 
@@ -219,8 +237,9 @@ func do(ctx context.Context, cachePath, name, source string, tls puller.TLS, pla
 //
 // The TLS and plain HTTP settings only matter to a registry, so an archive
 // never reads them. The command pulls one source per run, so plain HTTP is
-// allowed to that source's registry: the puller takes a list of registries,
-// and this one is the only entry.
+// allowed to one registry: the puller takes a list, and it is the only entry.
+// With a mirror, that registry is the mirror, and the registry the source
+// names keeps HTTPS, see "Image pulling" in agent/DESIGN.md.
 func pullerFor(source string, tls puller.TLS, plainHTTP bool) (puller.Puller, error) {
 	switch {
 	case strings.HasPrefix(source, string(os.PathSeparator)),
@@ -230,9 +249,26 @@ func pullerFor(source string, tls puller.TLS, plainHTTP bool) (puller.Puller, er
 	default:
 		// A reference that does not parse is reported by the pull, which
 		// names it as one.
-		if ref, err := imgname.ParseReference(source); plainHTTP && err == nil {
+		switch ref, err := imgname.ParseReference(source); {
+		case !plainHTTP:
+			// Every registry stays HTTPS only.
+		case tls.Mirror != "":
+			tls.PlainHTTPRegistries = []string{tls.Mirror}
+		case err == nil:
 			tls.PlainHTTPRegistries = []string{ref.Context().RegistryStr()}
 		}
 		return puller.NewRemote(tls)
 	}
+}
+
+// dropLevel leaves the log level out of a warning: the command prints every
+// line at the same level, so it says nothing to the reader.
+func dropLevel(kv []any) []any {
+	out := make([]any, 0, len(kv))
+	for i := 0; i+1 < len(kv); i += 2 {
+		if kv[i] != "level" {
+			out = append(out, kv[i], kv[i+1])
+		}
+	}
+	return out
 }

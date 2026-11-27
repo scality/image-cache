@@ -337,7 +337,43 @@ Pulling and extraction use
   goes with `--ca-file`, which covers the registries that serve TLS, and
   excludes `--insecure-skip-tls-verify`, meant for test clusters only.
   `imagecachectl import` keeps a `--plain-http` switch: it pulls one source
-  per run, so the switch already covers that source's registry alone.
+  per run, so the switch already covers that source's registry alone, or
+  the mirror when `--mirror` is given.
+- The library has no mirror support. `--mirror <host[:port]>` adds one global
+  mirror, tried before the registry each source names, as containerd does with
+  `hosts.toml`. The source keeps its real name (`ghcr.io/scality/...`), and
+  the puller builds `<mirror>/<repository>:<tag>` (or `@<digest>`) from the
+  mirror's registry name, never by parsing a string: a short host name would
+  read as a Docker Hub repository. Each registry API request to the mirror,
+  under `/v2/`, carries `ns=<registry>`, the query parameter containerd sends;
+  a registry that honours it prepends it to the repository. Docker Hub goes as
+  `ns=docker.io`. The mirror is a registry like any other: `--ca-file` covers
+  it, and it is reached over plain HTTP only if `--plain-http-registry` lists
+  it. Rewriting the reference rather than the host of each request lets the
+  library pick the scheme and name the mirror in its errors.
+  The choice is made before any layer streams. A pull uses the mirror once it
+  has resolved the manifest and the configuration and answered a HEAD for
+  every layer: without the HEAD, a mirror missing one layer would fail the
+  pull on every pass and the registry would never be tried. A resolve (the
+  adoption check) reads no layer, so it asks no HEAD. Otherwise the registry
+  is tried, and when both fail the error carries both causes. When the
+  registry answers, the mirror's failure is logged rather than returned, since
+  nothing failed: the agent logs it, and `imagecachectl` prints it as a
+  warning. The layers then stream from whichever answered: a mirror lost
+  during the stream fails the pull, and the next pass resolves again.
+  The mirror is trusted the way containerd trusts one. It is expected to hold
+  the images: a pull-through proxy that fetches a blob only on a GET would
+  answer the HEAD with a 404 and be passed over. For a source by tag, the
+  mirror's tag wins, even if the registry has moved it since; a source by
+  digest does not have that gap. The sentinel records the source as the
+  resource gives it, never the mirror reference. A source that already names
+  the mirror is pulled once, with no `ns`. One mirror per registry is out of
+  scope.
+  `imagecachectl import --mirror` does the same. Its `--plain-http` then goes
+  to the mirror, not to the source's registry, so it goes with `--ca-file`,
+  which covers that registry. The command runs on a host that may resolve no
+  cluster name, so the mirror is given in a form the host can reach, such as
+  an IP.
 
 The cache images are regular container images (they must remain importable
 and mountable with `ctr` by provisioning tooling), so an artifact-oriented
@@ -471,7 +507,9 @@ The agent never writes ImageCache resources (no status, no finalizers).
   nobody listens on leaves the node `pending`. Two registries run in the
   cluster: a pull over plain HTTP lands on the selected node only, and a
   registry signed by a private CA is refused until the shipped CA patch is
-  applied. An archive rewritten on the node with other content of the same
-  size is extracted again. `imagecachectl` seeds two directories on the
+  applied. With `--mirror`, a source the registry does not hold is pulled
+  from the mirror, then from the registry once the mirror is stopped. An
+  archive rewritten on the node with other content of the same size is
+  extracted again. `imagecachectl` seeds two directories on the
   worker: the agent adopts the one holding the image its resource names, with
   no extraction, and replaces the other.

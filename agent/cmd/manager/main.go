@@ -85,6 +85,7 @@ func main() {
 	var caFile string
 	var skipVerify bool
 	var plainHTTPRegistries stringList
+	var mirror string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -117,6 +118,10 @@ func main() {
 	flag.Var(&plainHTTPRegistries, "plain-http-registry",
 		"A registry, as host[:port] exactly as the sources name it, the agent may reach over plain HTTP. "+
 			"Repeatable. Excludes --insecure-skip-tls-verify.")
+	flag.StringVar(&mirror, "mirror", "",
+		"A registry, as host[:port], every source is pulled from first. The registry the source "+
+			"names is tried next, when the mirror fails. Reached over plain HTTP only if it is "+
+			"listed with --plain-http-registry.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -225,10 +230,10 @@ func main() {
 	// Checked before anything starts: an unusable CA would otherwise surface
 	// as a failed pull on every node and every resource.
 	remote, err := puller.NewRemote(puller.TLS{
-		CAFile: caFile, SkipVerify: skipVerify, PlainHTTPRegistries: plainHTTPRegistries,
+		CAFile: caFile, SkipVerify: skipVerify, PlainHTTPRegistries: plainHTTPRegistries, Mirror: mirror,
 	})
 	if err != nil {
-		setupLog.Error(err, "unable to set up registry TLS")
+		setupLog.Error(err, "unable to set up the registry access")
 		os.Exit(1)
 	}
 	if skipVerify {
@@ -239,6 +244,10 @@ func main() {
 		// shows up as "HTTP response to HTTPS client" on the pull.
 		setupLog.Info("WARNING: these registries may be reached over plain HTTP (--plain-http-registry)",
 			"registries", []string(plainHTTPRegistries))
+	}
+
+	if mirror != "" {
+		setupLog.Info("sources are pulled from the mirror first", "mirror", mirror)
 	}
 
 	fw, err := controller.NewFSWatcher(nodeName)

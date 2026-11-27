@@ -27,6 +27,8 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
@@ -1569,5 +1571,512 @@ func TestNewRemoteRefusesPlainHTTPRegistriesWithSkipVerify(t *testing.T) {
 	_, err := NewRemote(TLS{SkipVerify: true, PlainHTTPRegistries: []string{plainHost}})
 	if !errors.Is(err, ErrTLS) {
 		t.Fatalf("err = %v, want ErrTLS", err)
+	}
+}
+
+// mirrored returns a Remote built the way NewRemote builds it, with mirror and
+// the plain HTTP registries given, that reaches the registries through rt.
+func mirrored(t *testing.T, rt http.RoundTripper, mirror string, plain ...string) Remote {
+	t.Helper()
+	r, err := withRegistries(Remote{transport: rt}, TLS{Mirror: mirror, PlainHTTPRegistries: plain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// mirrorTest is a plain HTTP registry that records the ns parameter of every
+// request it receives.
+type mirrorTest struct {
+	host string
+	srv  *httptest.Server
+	mu   sync.Mutex
+	ns   []string
+	// broken is a blob digest answered with brokenStatus, as a registry
+	// that lost it or fails on it would.
+	broken       string
+	brokenStatus int
+	// heads lists the paths of the HEAD requests received.
+	heads []string
+	// onRequest, when set, runs on each request before it is served.
+	onRequest func()
+}
+
+// newMirrorTest serves an empty in-memory registry. Its host is
+// example.com:<port>, reached through loopbackTransport.
+func newMirrorTest(t *testing.T) *mirrorTest {
+	t.Helper()
+	m := &mirrorTest{}
+	reg := registry.New()
+	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		m.ns = append(m.ns, r.URL.Query().Get("ns"))
+		if r.Method == http.MethodHead {
+			m.heads = append(m.heads, r.URL.Path)
+		}
+		broken, status, hook := m.broken, m.brokenStatus, m.onRequest
+		m.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		if broken != "" && strings.HasSuffix(r.URL.Path, "/blobs/"+broken) {
+			w.WriteHeader(status)
+			return
+		}
+		reg.ServeHTTP(w, r)
+	}))
+	t.Cleanup(m.srv.Close)
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(m.srv.URL, "http://"))
+	m.host = "example.com:" + port
+	return m
+}
+
+// push stores img under path, and returns its digest. The push goes to the
+// loopback address, and its requests are not recorded.
+func (m *mirrorTest) push(t *testing.T, path string, img v1.Image) string {
+	t.Helper()
+	m.mu.Lock()
+	before, beforeHeads := len(m.ns), len(m.heads)
+	m.mu.Unlock()
+	if err := crane.Push(img, strings.TrimPrefix(m.srv.URL, "http://")+path); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.ns, m.heads = m.ns[:before], m.heads[:beforeHeads]
+	m.mu.Unlock()
+	d, err := img.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d.String()
+}
+
+func (m *mirrorTest) seen() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.ns)
+}
+
+func workerImage(t *testing.T) v1.Image {
+	t.Helper()
+	img, err := crane.Image(map[string][]byte{etcdTarPath: []byte(etcdBody)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return img
+}
+
+// pullAll pulls ref and reads the whole stream, the layers included.
+func pullAll(r Remote, ref string) (Image, error) {
+	rc, id, err := r.Pull(context.Background(), ref)
+	if err != nil {
+		return Image{}, err
+	}
+	_, err = io.Copy(io.Discard, rc)
+	if cerr := rc.Close(); err == nil {
+		err = cerr
+	}
+	return id, err
+}
+
+// The mirror serves the image and the registry is never asked. Each request
+// to the mirror carries the ns of the source's registry: Docker Hub goes as
+// docker.io, as containerd sends it, and a source that already names the
+// mirror carries none.
+func TestRemotePullTriesTheMirrorFirst(t *testing.T) {
+	const dockerHub = "docker.io"
+	for _, tc := range []struct {
+		name, path string
+		source     func(upstream, mirror, digest string) string
+		ns         func(upstream string) string
+	}{
+		{"tag", workerRefPath,
+			func(up, _, _ string) string { return up + workerRefPath },
+			func(up string) string { return up }},
+		{"digest", workerRefPath,
+			func(up, _, d string) string { return up + "/boot-cache/worker@" + d },
+			func(up string) string { return up }},
+		{"docker hub", "/library/worker:1.0.0",
+			func(_, _, _ string) string { return "worker:1.0.0" },
+			func(string) string { return dockerHub }},
+		{"source on the mirror", workerRefPath,
+			func(_, m, _ string) string { return m + workerRefPath },
+			func(string) string { return "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+			digest := mirror.push(t, tc.path, workerImage(t))
+			r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+			id, err := pullAll(r, tc.source(upstream.host, mirror.host, digest))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if id.Digest != digest {
+				t.Errorf("digest = %s, want %s", id.Digest, digest)
+			}
+			seen := mirror.seen()
+			if len(seen) == 0 {
+				t.Fatal("the mirror received no request")
+			}
+			for _, ns := range seen {
+				if want := tc.ns(upstream.host); ns != want {
+					t.Errorf("the mirror received ns=%q, want %q", ns, want)
+				}
+			}
+			if n := len(upstream.seen()); n != 0 {
+				t.Errorf("the registry received %d requests, want none", n)
+			}
+		})
+	}
+}
+
+func TestRemotePullFallsBackOnTheRegistry(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	digest := upstream.push(t, workerRefPath, workerImage(t))
+	r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+	id, err := pullAll(r, upstream.host+workerRefPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Digest != digest {
+		t.Errorf("digest = %s, want %s", id.Digest, digest)
+	}
+	if len(mirror.seen()) == 0 {
+		t.Error("the mirror was not tried first")
+	}
+	for _, ns := range upstream.seen() {
+		if ns != "" {
+			t.Errorf("the registry received ns=%q, want none", ns)
+		}
+	}
+}
+
+func TestRemotePullNamesBothFailures(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	mirror.srv.Close()
+	r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+	_, err := pullAll(r, upstream.host+workerRefPath)
+	if !errors.Is(err, ErrPull) {
+		t.Fatalf("err = %v, want ErrPull", err)
+	}
+	for _, want := range []string{"connection refused", "NAME_UNKNOWN"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to carry %q", err, want)
+		}
+	}
+}
+
+// The mirror follows the plain HTTP list like any registry: unlisted, it is
+// reached over HTTPS only, which a plain HTTP server cannot answer.
+func TestRemotePullReachesAnUnlistedMirrorOverHTTPSOnly(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	mirror.push(t, workerRefPath, workerImage(t))
+	digest := upstream.push(t, workerRefPath, workerImage(t))
+	r := mirrored(t, loopbackTransport("", t), mirror.host, upstream.host)
+
+	id, err := pullAll(r, upstream.host+workerRefPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Digest != digest {
+		t.Errorf("digest = %s, want %s", id.Digest, digest)
+	}
+	if n := len(mirror.seen()); n != 0 {
+		t.Errorf("the mirror received %d plain HTTP requests, want none", n)
+	}
+}
+
+// --ca-file covers the mirror. tlsRegistry dials its server for any host,
+// and its certificate covers example.com only: a pull that reached the
+// registry instead of the mirror would fail on the name.
+func TestRemotePullTrustsTheGivenCAForTheMirror(t *testing.T) {
+	ref, caFile, base := tlsRegistry(t)
+	r, err := newRemote(TLS{CAFile: caFile, Mirror: registryOf(t, ref)}, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := pullAll(r, "registry.local:5000"+workerRefPath); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewRemoteRejectsAMirrorThatIsNotAHost(t *testing.T) {
+	for _, m := range []string{"https://registry.local", "registry.local/path", "Registry.local:x"} {
+		if _, err := NewRemote(TLS{Mirror: m}); !errors.Is(err, ErrMirror) {
+			t.Errorf("NewRemote(Mirror: %q) err = %v, want ErrMirror", m, err)
+		}
+	}
+}
+
+// breakLayer makes the mirror answer status for the only layer of img.
+func (m *mirrorTest) breakLayer(t *testing.T, img v1.Image, status int) string {
+	t.Helper()
+	layers, err := img.Layers()
+	if err != nil || len(layers) != 1 {
+		t.Fatalf("want one layer, got %d (%v)", len(layers), err)
+	}
+	d, err := layers[0].Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.broken, m.brokenStatus = d.String(), status
+	m.mu.Unlock()
+	return d.String()
+}
+
+// A mirror that holds the manifest and the configuration but misses a layer
+// is passed over before the layers stream, for a 404 as for a server error.
+func TestRemotePullFallsBackWhenTheMirrorMissesALayer(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+			img := workerImage(t)
+			mirror.push(t, workerRefPath, img)
+			digest := upstream.push(t, workerRefPath, img)
+			layer := mirror.breakLayer(t, img, status)
+			r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+			id, err := pullAll(r, upstream.host+workerRefPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if id.Digest != digest {
+				t.Errorf("digest = %s, want %s", id.Digest, digest)
+			}
+			mirror.mu.Lock()
+			headed := slices.ContainsFunc(mirror.heads, func(p string) bool { return strings.HasSuffix(p, layer) })
+			mirror.mu.Unlock()
+			if !headed {
+				t.Errorf("the mirror received no HEAD for %s: %v", layer, mirror.heads)
+			}
+			if len(upstream.seen()) == 0 {
+				t.Error("the registry was not tried")
+			}
+		})
+	}
+}
+
+func TestRemotePullNamesTheLayerTheMirrorMisses(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	img := workerImage(t)
+	mirror.push(t, workerRefPath, img)
+	layer := mirror.breakLayer(t, img, http.StatusNotFound)
+	r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+	_, err := pullAll(r, upstream.host+workerRefPath)
+	if !errors.Is(err, ErrPull) {
+		t.Fatalf("err = %v, want ErrPull", err)
+	}
+	for _, want := range []string{"the mirror misses a layer", layer, "NAME_UNKNOWN"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to carry %q", err, want)
+		}
+	}
+}
+
+// Every HEAD the mirror receives carries ns, like the other requests.
+func TestRemotePullChecksTheLayersWithNS(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	mirror.push(t, workerRefPath, workerImage(t))
+	r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+	if _, err := pullAll(r, upstream.host+workerRefPath); err != nil {
+		t.Fatal(err)
+	}
+	mirror.mu.Lock()
+	blobHeads := slices.ContainsFunc(mirror.heads, func(p string) bool { return strings.Contains(p, "/blobs/") })
+	mirror.mu.Unlock()
+	if !blobHeads {
+		t.Errorf("Pull sent no HEAD for a layer to the mirror: %v", mirror.heads)
+	}
+	for _, ns := range mirror.seen() {
+		if ns != upstream.host {
+			t.Errorf("the mirror received ns=%q, want %q", ns, upstream.host)
+		}
+	}
+}
+
+// logged returns a context whose logr logger appends each line to the
+// returned buffer.
+func logged() (context.Context, *strings.Builder) {
+	var buf strings.Builder
+	var mu sync.Mutex
+	l := funcr.New(func(_, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		buf.WriteString(args + "\n")
+	}, funcr.Options{})
+	return logr.NewContext(context.Background(), l), &buf
+}
+
+// A mirror passed over is logged, since the pull itself succeeds. A mirror
+// that answers is not.
+func TestRemotePullLogsAMirrorItPassedOver(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	img := workerImage(t)
+	mirror.push(t, workerRefPath, img)
+	upstream.push(t, workerRefPath, img)
+	r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+	ctx, buf := logged()
+	if _, err := r.Resolve(ctx, upstream.host+workerRefPath); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a mirror that answered was logged: %s", buf.String())
+	}
+
+	mirror.srv.Close()
+	ctx, buf = logged()
+	if _, err := r.Resolve(ctx, upstream.host+workerRefPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Mirror failed", mirror.host, "connection refused"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("log = %q, want it to carry %q", buf.String(), want)
+		}
+	}
+}
+
+// counting counts the requests to host that reach the transport, sent or not:
+// a cancelled context stops a request before the server sees it.
+type counting struct {
+	next http.RoundTripper
+	host string
+	n    atomic.Int32
+}
+
+func (c *counting) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Host == c.host {
+		c.n.Add(1)
+	}
+	return c.next.RoundTrip(req)
+}
+
+// A pull cancelled while the mirror is tried stops there: the registry is not
+// even attempted.
+func TestRemotePullCancelledOnTheMirrorSkipsTheRegistry(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	upstream.push(t, workerRefPath, workerImage(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mirror.mu.Lock()
+	mirror.onRequest = cancel
+	mirror.mu.Unlock()
+	toUpstream := &counting{next: loopbackTransport("", t), host: upstream.host}
+	r := mirrored(t, toUpstream, mirror.host, mirror.host, upstream.host)
+
+	_, err := r.Resolve(ctx, upstream.host+workerRefPath)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if n := toUpstream.n.Load(); n != 0 {
+		t.Errorf("%d requests to the registry after the cancel, want none", n)
+	}
+}
+
+// The mirror reference keeps the mirror as its registry whatever the shape of
+// its name. Parsed back from a string, a short host name would read as a
+// Docker Hub repository.
+func TestOnMirrorKeepsTheMirrorAsRegistry(t *testing.T) {
+	const source, short, ip = "ghcr.io/scality/x:1.0", "mirror", "10.0.0.1:5000"
+	for _, tc := range []struct{ mirror, source, want string }{
+		{short, source, "mirror/scality/x:1.0"},
+		{"localhost", source, "localhost/scality/x:1.0"},
+		{ip, source, ip + "/scality/x:1.0"},
+		{short, "ghcr.io/scality/x@sha256:" + strings.Repeat("a", 64),
+			"mirror/scality/x@sha256:" + strings.Repeat("a", 64)},
+		{short, "x:1.0", "mirror/library/x:1.0"},
+	} {
+		t.Run(tc.mirror+" "+tc.source, func(t *testing.T) {
+			parsed, err := name.ParseReference(tc.source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := mirrored(t, nil, tc.mirror).onMirror(parsed)
+			if got.Context().RegistryStr() != tc.mirror {
+				t.Errorf("registry = %q, want %q", got.Context().RegistryStr(), tc.mirror)
+			}
+			if got.String() != tc.want {
+				t.Errorf("reference = %q, want %q", got.String(), tc.want)
+			}
+		})
+	}
+}
+
+// A mirror listed for plain HTTP keeps that mark on its reference.
+func TestOnMirrorMarksAListedMirrorInsecure(t *testing.T) {
+	parsed, err := name.ParseReference("ghcr.io/scality/y:1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const short = "mirror"
+	got := mirrored(t, nil, short, short).onMirror(parsed)
+	if scheme := got.Context().Scheme(); scheme != "http" {
+		t.Errorf("scheme = %q, want http", scheme)
+	}
+}
+
+// Resolve reads no layer, so it does not check the mirror holds them: an
+// adoption check that the mirror's configuration answers needs no registry.
+func TestRemoteResolveTrustsAMirrorMissingALayer(t *testing.T) {
+	mirror, upstream := newMirrorTest(t), newMirrorTest(t)
+	img := workerImage(t)
+	digest := mirror.push(t, workerRefPath, img)
+	mirror.breakLayer(t, img, http.StatusNotFound)
+	upstream.srv.Close()
+	r := mirrored(t, loopbackTransport("", t), mirror.host, mirror.host, upstream.host)
+
+	id, err := r.Resolve(context.Background(), upstream.host+workerRefPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Digest != digest {
+		t.Errorf("digest = %s, want %s", id.Digest, digest)
+	}
+	mirror.mu.Lock()
+	defer mirror.mu.Unlock()
+	if slices.ContainsFunc(mirror.heads, func(p string) bool { return strings.Contains(p, "/blobs/") }) {
+		t.Errorf("Resolve sent a HEAD for a layer: %v", mirror.heads)
+	}
+}
+
+// roundTripFunc records the request it is given.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// ns goes on the registry API requests to the mirror only, appended to the
+// query they carry, and the request given is left as it was.
+func TestWithNamespaceTouchesOnlyRegistryCallsToTheMirror(t *testing.T) {
+	for _, tc := range []struct{ url, want string }{
+		{"https://mirror/v2/scality/x/manifests/1", "ns=ghcr.io"},
+		{"https://mirror/v2/scality/x/blobs/sha256:a?digest=b", "digest=b&ns=ghcr.io"},
+		{"https://mirror/token?scope=pull", "scope=pull"},
+		{"https://storage/v2/scality/x/blobs/sha256:a?X-Amz-Signature=s", "X-Amz-Signature=s"},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			var got string
+			rt := withNamespace{host: "mirror", ns: "ghcr.io", next: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				got = r.URL.RawQuery
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+			})}
+			req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+			before := req.URL.RawQuery
+			if _, err := rt.RoundTrip(req); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("query = %q, want %q", got, tc.want)
+			}
+			if req.URL.RawQuery != before {
+				t.Errorf("the request given was changed: %q", req.URL.RawQuery)
+			}
+		})
 	}
 }

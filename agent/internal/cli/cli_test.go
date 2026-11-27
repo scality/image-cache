@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net"
@@ -31,9 +32,11 @@ const (
 	importCmd    = "import"
 	nameFlag     = "--name"
 	helpFlag     = "--help"
-	etcdTarPath  = "images/etcd.tar"
-	pauseTarPath = "images/pause.tar"
-	SentinelName = ".image-cache-agent.json"
+	// cachePathFlag is spelled once for goconst, which counts it in slice literals.
+	cachePathFlag = "--cache-path"
+	etcdTarPath   = "images/etcd.tar"
+	pauseTarPath  = "images/pause.tar"
+	SentinelName  = ".image-cache-agent.json"
 )
 
 // archive writes a docker archive shaped like a boot cache image.
@@ -830,5 +833,111 @@ func TestPlainHTTPIsNotAnnouncedForAnArchive(t *testing.T) {
 	}
 	if strings.Contains(errOut, "plain HTTP") {
 		t.Errorf("stderr warns about plain HTTP for an archive: %s", errOut)
+	}
+}
+
+// pauseContent is what the mirror serves for pause.tar.
+const pauseContent = "pause"
+
+// The source names a registry that does not exist, so only the mirror can
+// serve it. --plain-http goes to the mirror.
+func TestImportThroughAMirror(t *testing.T) {
+	ref := served(t, map[string][]byte{pauseTarPath: []byte(pauseContent)})
+	mirror, _, _ := strings.Cut(ref, "/")
+	cacheDir := t.TempDir()
+
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, cachePathFlag, cacheDir,
+		"--plain-http", "--mirror", mirror, "registry.invalid:5000/boot-cache/worker:1.0.0")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
+	}
+	if !strings.Contains(errOut, "the mirror may be reached over plain HTTP") {
+		t.Errorf("stderr does not name the mirror in the plain HTTP warning: %s", errOut)
+	}
+	got, err := os.ReadFile(filepath.Join(cacheDir, resourceName, "pause.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != pauseContent {
+		t.Errorf("pause.tar = %q, want %q", got, pauseContent)
+	}
+}
+
+func TestMirrorThatIsNotAHostIsNamed(t *testing.T) {
+	for _, flags := range [][]string{{}, {"--plain-http"}} {
+		args := append([]string{importCmd, nameFlag, resourceName, cachePathFlag, t.TempDir(),
+			"--mirror", "https://registry.local"}, flags...)
+		code, _, errOut := run(t, append(args, "registry.local/boot-cache/worker:1.0.0")...)
+		if code != 1 {
+			t.Fatalf("%v: exit = %d, want 1 (%s)", flags, code, errOut)
+		}
+		if !strings.Contains(errOut, puller.ErrMirror.Error()) {
+			t.Errorf("%v: stderr = %s, want the mirror named", flags, errOut)
+		}
+	}
+}
+
+// The pull works through the registry, so the mirror it passed over is a
+// warning, not a failure.
+func TestImportWarnsAboutAMirrorItPassedOver(t *testing.T) {
+	srv := httptest.NewTLSServer(registry.New())
+	t.Cleanup(srv.Close)
+	img, err := crane.Image(map[string][]byte{pauseTarPath: []byte(pauseContent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := strings.TrimPrefix(srv.URL, "https://") + "/boot-cache/worker:1.0.0"
+	if err := crane.Push(img, ref, crane.WithTransport(srv.Client().Transport)); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing listens on port 1.
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, cachePathFlag, t.TempDir(),
+		"--insecure-skip-tls-verify", "--mirror", "127.0.0.1:1", ref)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
+	}
+	for _, want := range []string{"imagecachectl: warning:", "Mirror failed", "127.0.0.1:1"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr = %s, want it to carry %q", errOut, want)
+		}
+	}
+	if strings.Contains(errOut, `"level"`) {
+		t.Errorf("stderr carries the log level: %s", errOut)
+	}
+}
+
+// A plain HTTP mirror with a fallback registry signed by a private CA: with
+// --mirror, --plain-http and --ca-file cover different registries.
+func TestPlainHTTPMirrorGoesWithACAFile(t *testing.T) {
+	srv := httptest.NewTLSServer(registry.New())
+	t.Cleanup(srv.Close)
+	img, err := crane.Image(map[string][]byte{pauseTarPath: []byte(pauseContent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := strings.TrimPrefix(srv.URL, "https://") + "/boot-cache/worker:1.0.0"
+	if err := crane.Push(img, ref, crane.WithTransport(srv.Client().Transport)); err != nil {
+		t.Fatal(err)
+	}
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	block := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	if err := os.WriteFile(caFile, block, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := t.TempDir()
+
+	// Nothing listens on port 1: the pull falls back on the registry, which
+	// only the CA file lets the command trust.
+	code, _, errOut := run(t, importCmd, nameFlag, resourceName, cachePathFlag, cacheDir,
+		"--mirror", "127.0.0.1:1", "--plain-http", "--ca-file", caFile, ref)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (%s)", code, errOut)
+	}
+	got, err := os.ReadFile(filepath.Join(cacheDir, resourceName, "pause.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != pauseContent {
+		t.Errorf("pause.tar = %q, want %q", got, pauseContent)
 	}
 }
